@@ -1,0 +1,662 @@
+//
+//  ConflictResolution.swift
+//  CloudDriveCore
+//
+//  冲突检测和自动解决系统
+//
+
+import Foundation
+
+// MARK: - 冲突类型定义
+
+/// 冲突类型枚举
+public enum ConflictType: String, CaseIterable, Codable {
+    case contentConflict = "content_conflict"           // 内容冲突
+    case metadataConflict = "metadata_conflict"         // 元数据冲突
+    case structuralConflict = "structural_conflict"     // 结构冲突
+    case permissionConflict = "permission_conflict"     // 权限冲突
+    case versionConflict = "version_conflict"           // 版本冲突
+    case timestampConflict = "timestamp_conflict"       // 时间戳冲突
+    case moveConflict = "move_conflict"                 // 移动冲突
+    case deleteConflict = "delete_conflict"             // 删除冲突
+    case createConflict = "create_conflict"             // 创建冲突
+    case lockConflict = "lock_conflict"                 // 锁定冲突
+    
+    public var severity: ConflictSeverity {
+        switch self {
+        case .contentConflict, .structuralConflict:
+            return .critical
+        case .metadataConflict, .versionConflict, .moveConflict:
+            return .high
+        case .permissionConflict, .timestampConflict:
+            return .medium
+        case .deleteConflict, .createConflict, .lockConflict:
+            return .low
+        }
+    }
+    
+    public var description: String {
+        switch self {
+        case .contentConflict:
+            return "文件内容存在冲突"
+        case .metadataConflict:
+            return "文件元数据存在冲突"
+        case .structuralConflict:
+            return "文件结构存在冲突"
+        case .permissionConflict:
+            return "文件权限存在冲突"
+        case .versionConflict:
+            return "文件版本存在冲突"
+        case .timestampConflict:
+            return "时间戳存在冲突"
+        case .moveConflict:
+            return "文件移动存在冲突"
+        case .deleteConflict:
+            return "文件删除存在冲突"
+        case .createConflict:
+            return "文件创建存在冲突"
+        case .lockConflict:
+            return "文件锁定存在冲突"
+        }
+    }
+}
+
+/// 冲突严重程度
+public enum ConflictSeverity: Int, Codable, Comparable {
+    case low = 1
+    case medium = 2
+    case high = 3
+    case critical = 4
+    
+    public static func < (lhs: ConflictSeverity, rhs: ConflictSeverity) -> Bool {
+        return lhs.rawValue < rhs.rawValue
+    }
+}
+
+// MARK: - 冲突信息结构
+
+/// 冲突信息
+public struct ConflictInfo: Codable {
+    public let id: String
+    public let type: ConflictType
+    public let severity: ConflictSeverity
+    public let filePath: String
+    public let localVersion: FileVersion
+    public let remoteVersion: FileVersion
+    public let detectedAt: Date
+    public let description: String
+    public let affectedRanges: [ConflictRange]?
+    public let resolutionStrategies: [ResolutionStrategy]
+    
+    public init(
+        type: ConflictType,
+        filePath: String,
+        localVersion: FileVersion,
+        remoteVersion: FileVersion,
+        description: String? = nil,
+        affectedRanges: [ConflictRange]? = nil
+    ) {
+        self.id = UUID().uuidString
+        self.type = type
+        self.severity = type.severity
+        self.filePath = filePath
+        self.localVersion = localVersion
+        self.remoteVersion = remoteVersion
+        self.detectedAt = Date()
+        self.description = description ?? type.description
+        self.affectedRanges = affectedRanges
+        self.resolutionStrategies = ResolutionStrategy.availableStrategies(for: type)
+    }
+}
+
+/// 文件版本信息
+public struct FileVersion: Codable {
+    public let hash: String
+    public let timestamp: Date
+    public let size: Int64
+    public let deviceId: String
+    public let userId: String
+    public let metadata: [String: String]
+    public let content: Data?
+    
+    public init(hash: String, timestamp: Date, size: Int64, deviceId: String, userId: String, metadata: [String: String] = [:], content: Data? = nil) {
+        self.hash = hash
+        self.timestamp = timestamp
+        self.size = size
+        self.deviceId = deviceId
+        self.userId = userId
+        self.metadata = metadata
+        self.content = content
+    }
+}
+
+/// 冲突范围
+public struct ConflictRange: Codable {
+    public let startOffset: Int
+    public let endOffset: Int
+    public let localContent: String
+    public let remoteContent: String
+    public let contextBefore: String
+    public let contextAfter: String
+    
+    public init(startOffset: Int, endOffset: Int, localContent: String, remoteContent: String, contextBefore: String = "", contextAfter: String = "") {
+        self.startOffset = startOffset
+        self.endOffset = endOffset
+        self.localContent = localContent
+        self.remoteContent = remoteContent
+        self.contextBefore = contextBefore
+        self.contextAfter = contextAfter
+    }
+}
+
+// MARK: - 解决策略
+
+/// 冲突解决策略
+public enum ResolutionStrategy: String, CaseIterable, Codable {
+    case useLocal = "use_local"                     // 使用本地版本
+    case useRemote = "use_remote"                   // 使用远程版本
+    case merge = "merge"                            // 智能合并
+    case manualResolve = "manual_resolve"           // 手动解决
+    case createBoth = "create_both"                 // 创建两个版本
+    case useNewest = "use_newest"                   // 使用最新版本
+    case useOldest = "use_oldest"                   // 使用最旧版本
+    case useLarger = "use_larger"                   // 使用更大的文件
+    case useSmaller = "use_smaller"                 // 使用更小的文件
+    case threeWayMerge = "three_way_merge"          // 三路合并
+    
+    public var description: String {
+        switch self {
+        case .useLocal:
+            return "使用本地版本"
+        case .useRemote:
+            return "使用远程版本"
+        case .merge:
+            return "智能合并"
+        case .manualResolve:
+            return "手动解决"
+        case .createBoth:
+            return "保留两个版本"
+        case .useNewest:
+            return "使用最新版本"
+        case .useOldest:
+            return "使用最旧版本"
+        case .useLarger:
+            return "使用更大的文件"
+        case .useSmaller:
+            return "使用更小的文件"
+        case .threeWayMerge:
+            return "三路合并"
+        }
+    }
+    
+    public static func availableStrategies(for conflictType: ConflictType) -> [ResolutionStrategy] {
+        switch conflictType {
+        case .contentConflict:
+            return [.merge, .useLocal, .useRemote, .threeWayMerge, .manualResolve, .createBoth]
+        case .metadataConflict:
+            return [.useNewest, .useLocal, .useRemote, .merge, .manualResolve]
+        case .structuralConflict:
+            return [.manualResolve, .useLocal, .useRemote, .createBoth]
+        case .permissionConflict:
+            return [.merge, .useLocal, .useRemote, .manualResolve]
+        case .versionConflict:
+            return [.useNewest, .useLocal, .useRemote, .merge]
+        case .timestampConflict:
+            return [.useNewest, .useOldest, .useLocal, .useRemote]
+        case .moveConflict:
+            return [.useLocal, .useRemote, .createBoth, .manualResolve]
+        case .deleteConflict:
+            return [.useLocal, .useRemote, .manualResolve]
+        case .createConflict:
+            return [.createBoth, .useLocal, .useRemote, .merge]
+        case .lockConflict:
+            return [.useNewest, .manualResolve]
+        }
+    }
+}
+
+// MARK: - 冲突检测器
+
+/// 冲突检测器
+public class ConflictDetector {
+    private let deviceId: String
+    private let userId: String
+    
+    public init(deviceId: String, userId: String) {
+        self.deviceId = deviceId
+        self.userId = userId
+    }
+    
+    /// 检测文件冲突
+    public func detectConflicts(localVersion: FileVersion, remoteVersion: FileVersion, filePath: String) -> [ConflictInfo] {
+        var conflicts: [ConflictInfo] = []
+        
+        // 检查内容冲突
+        if let contentConflicts = detectContentConflicts(localVersion: localVersion, remoteVersion: remoteVersion, filePath: filePath) {
+            conflicts.append(contentsOf: contentConflicts)
+        }
+        
+        // 检查元数据冲突
+        if let metadataConflict = detectMetadataConflicts(localVersion: localVersion, remoteVersion: remoteVersion, filePath: filePath) {
+            conflicts.append(metadataConflict)
+        }
+        
+        // 检查版本冲突
+        if let versionConflict = detectVersionConflicts(localVersion: localVersion, remoteVersion: remoteVersion, filePath: filePath) {
+            conflicts.append(versionConflict)
+        }
+        
+        // 检查时间戳冲突
+        if let timestampConflict = detectTimestampConflicts(localVersion: localVersion, remoteVersion: remoteVersion, filePath: filePath) {
+            conflicts.append(timestampConflict)
+        }
+        
+        return conflicts
+    }
+    
+    private func detectContentConflicts(localVersion: FileVersion, remoteVersion: FileVersion, filePath: String) -> [ConflictInfo]? {
+        guard localVersion.hash != remoteVersion.hash else { return nil }
+        guard let localContent = localVersion.content, let remoteContent = remoteVersion.content else { return nil }
+        
+        let localString = String(data: localContent, encoding: .utf8) ?? ""
+        let remoteString = String(data: remoteContent, encoding: .utf8) ?? ""
+        
+        // 使用差异算法检测冲突范围
+        let conflictRanges = detectConflictRanges(local: localString, remote: remoteString)
+        
+        if !conflictRanges.isEmpty {
+            let conflict = ConflictInfo(
+                type: .contentConflict,
+                filePath: filePath,
+                localVersion: localVersion,
+                remoteVersion: remoteVersion,
+                description: "文件内容在 \(conflictRanges.count) 个位置存在冲突",
+                affectedRanges: conflictRanges
+            )
+            return [conflict]
+        }
+        
+        return nil
+    }
+    
+    private func detectMetadataConflicts(localVersion: FileVersion, remoteVersion: FileVersion, filePath: String) -> ConflictInfo? {
+        let localMetadata = localVersion.metadata
+        let remoteMetadata = remoteVersion.metadata
+        
+        var conflictingKeys: [String] = []
+        
+        for (key, localValue) in localMetadata {
+            if let remoteValue = remoteMetadata[key], localValue != remoteValue {
+                conflictingKeys.append(key)
+            }
+        }
+        
+        if !conflictingKeys.isEmpty {
+            return ConflictInfo(
+                type: .metadataConflict,
+                filePath: filePath,
+                localVersion: localVersion,
+                remoteVersion: remoteVersion,
+                description: "元数据字段冲突: \(conflictingKeys.joined(separator: ", "))"
+            )
+        }
+        
+        return nil
+    }
+    
+    private func detectVersionConflicts(localVersion: FileVersion, remoteVersion: FileVersion, filePath: String) -> ConflictInfo? {
+        // 检查版本冲突的逻辑
+        let timeDiff = abs(localVersion.timestamp.timeIntervalSince(remoteVersion.timestamp))
+        
+        // 如果时间差很小但内容不同，可能是版本冲突
+        if timeDiff < 60 && localVersion.hash != remoteVersion.hash {
+            return ConflictInfo(
+                type: .versionConflict,
+                filePath: filePath,
+                localVersion: localVersion,
+                remoteVersion: remoteVersion,
+                description: "同时修改导致的版本冲突"
+            )
+        }
+        
+        return nil
+    }
+    
+    private func detectTimestampConflicts(localVersion: FileVersion, remoteVersion: FileVersion, filePath: String) -> ConflictInfo? {
+        let timeDiff = localVersion.timestamp.timeIntervalSince(remoteVersion.timestamp)
+        
+        // 如果本地版本更旧但内容不同，可能是时间戳冲突
+        if timeDiff < -300 && localVersion.hash != remoteVersion.hash {
+            return ConflictInfo(
+                type: .timestampConflict,
+                filePath: filePath,
+                localVersion: localVersion,
+                remoteVersion: remoteVersion,
+                description: "时间戳异常，本地版本较旧但内容不同"
+            )
+        }
+        
+        return nil
+    }
+    
+    private func detectConflictRanges(local: String, remote: String) -> [ConflictRange] {
+        // 简化的差异检测算法
+        let localLines = local.components(separatedBy: .newlines)
+        let remoteLines = remote.components(separatedBy: .newlines)
+        
+        var conflictRanges: [ConflictRange] = []
+        var localOffset = 0
+        var remoteOffset = 0
+        
+        let maxLines = max(localLines.count, remoteLines.count)
+        
+        for i in 0..<maxLines {
+            let localLine = i < localLines.count ? localLines[i] : ""
+            let remoteLine = i < remoteLines.count ? remoteLines[i] : ""
+            
+            if localLine != remoteLine {
+                let startOffset = localOffset
+                let endOffset = localOffset + localLine.count
+                
+                let contextBefore = i > 0 ? localLines[i-1] : ""
+                let contextAfter = i < localLines.count - 1 ? localLines[i+1] : ""
+                
+                let conflictRange = ConflictRange(
+                    startOffset: startOffset,
+                    endOffset: endOffset,
+                    localContent: localLine,
+                    remoteContent: remoteLine,
+                    contextBefore: contextBefore,
+                    contextAfter: contextAfter
+                )
+                
+                conflictRanges.append(conflictRange)
+            }
+            
+            localOffset += localLine.count + 1 // +1 for newline
+        }
+        
+        return conflictRanges
+    }
+}
+
+// MARK: - 自动解决器
+
+/// 自动冲突解决器
+public class AutoConflictResolver {
+    private let deviceId: String
+    private let userId: String
+    
+    public init(deviceId: String, userId: String) {
+        self.deviceId = deviceId
+        self.userId = userId
+    }
+    
+    /// 自动解决冲突
+    public func resolveConflict(_ conflict: ConflictInfo, strategy: ResolutionStrategy) -> ConflictResolutionResult {
+        switch strategy {
+        case .useLocal:
+            return resolveUseLocal(conflict)
+        case .useRemote:
+            return resolveUseRemote(conflict)
+        case .merge:
+            return resolveMerge(conflict)
+        case .useNewest:
+            return resolveUseNewest(conflict)
+        case .useOldest:
+            return resolveUseOldest(conflict)
+        case .useLarger:
+            return resolveUseLarger(conflict)
+        case .useSmaller:
+            return resolveUseSmaller(conflict)
+        case .threeWayMerge:
+            return resolveThreeWayMerge(conflict)
+        case .createBoth:
+            return resolveCreateBoth(conflict)
+        case .manualResolve:
+            return ConflictResolutionResult(
+                success: false,
+                resolvedVersion: nil,
+                strategy: strategy,
+                message: "需要手动解决冲突"
+            )
+        }
+    }
+    
+    private func resolveUseLocal(_ conflict: ConflictInfo) -> ConflictResolutionResult {
+        return ConflictResolutionResult(
+            success: true,
+            resolvedVersion: conflict.localVersion,
+            strategy: .useLocal,
+            message: "使用本地版本解决冲突"
+        )
+    }
+    
+    private func resolveUseRemote(_ conflict: ConflictInfo) -> ConflictResolutionResult {
+        return ConflictResolutionResult(
+            success: true,
+            resolvedVersion: conflict.remoteVersion,
+            strategy: .useRemote,
+            message: "使用远程版本解决冲突"
+        )
+    }
+    
+    private func resolveMerge(_ conflict: ConflictInfo) -> ConflictResolutionResult {
+        guard let localContent = conflict.localVersion.content,
+              let remoteContent = conflict.remoteVersion.content else {
+            return ConflictResolutionResult(
+                success: false,
+                resolvedVersion: nil,
+                strategy: .merge,
+                message: "无法获取文件内容进行合并"
+            )
+        }
+        
+        let localString = String(data: localContent, encoding: .utf8) ?? ""
+        let remoteString = String(data: remoteContent, encoding: .utf8) ?? ""
+        
+        let mergedContent = performIntelligentMerge(local: localString, remote: remoteString, conflictRanges: conflict.affectedRanges)
+        
+        guard let mergedData = mergedContent.data(using: .utf8) else {
+            return ConflictResolutionResult(
+                success: false,
+                resolvedVersion: nil,
+                strategy: .merge,
+                message: "合并后的内容无法编码"
+            )
+        }
+        
+        let mergedVersion = FileVersion(
+            hash: mergedData.sha256,
+            timestamp: Date(),
+            size: Int64(mergedData.count),
+            deviceId: deviceId,
+            userId: userId,
+            metadata: mergeMetadata(conflict.localVersion.metadata, conflict.remoteVersion.metadata),
+            content: mergedData
+        )
+        
+        return ConflictResolutionResult(
+            success: true,
+            resolvedVersion: mergedVersion,
+            strategy: .merge,
+            message: "智能合并完成"
+        )
+    }
+    
+    private func resolveUseNewest(_ conflict: ConflictInfo) -> ConflictResolutionResult {
+        let useLocal = conflict.localVersion.timestamp > conflict.remoteVersion.timestamp
+        return ConflictResolutionResult(
+            success: true,
+            resolvedVersion: useLocal ? conflict.localVersion : conflict.remoteVersion,
+            strategy: .useNewest,
+            message: "使用最新版本解决冲突"
+        )
+    }
+    
+    private func resolveUseOldest(_ conflict: ConflictInfo) -> ConflictResolutionResult {
+        let useLocal = conflict.localVersion.timestamp < conflict.remoteVersion.timestamp
+        return ConflictResolutionResult(
+            success: true,
+            resolvedVersion: useLocal ? conflict.localVersion : conflict.remoteVersion,
+            strategy: .useOldest,
+            message: "使用最旧版本解决冲突"
+        )
+    }
+    
+    private func resolveUseLarger(_ conflict: ConflictInfo) -> ConflictResolutionResult {
+        let useLocal = conflict.localVersion.size > conflict.remoteVersion.size
+        return ConflictResolutionResult(
+            success: true,
+            resolvedVersion: useLocal ? conflict.localVersion : conflict.remoteVersion,
+            strategy: .useLarger,
+            message: "使用更大的文件解决冲突"
+        )
+    }
+    
+    private func resolveUseSmaller(_ conflict: ConflictInfo) -> ConflictResolutionResult {
+        let useLocal = conflict.localVersion.size < conflict.remoteVersion.size
+        return ConflictResolutionResult(
+            success: true,
+            resolvedVersion: useLocal ? conflict.localVersion : conflict.remoteVersion,
+            strategy: .useSmaller,
+            message: "使用更小的文件解决冲突"
+        )
+    }
+    
+    private func resolveThreeWayMerge(_ conflict: ConflictInfo) -> ConflictResolutionResult {
+        // 三路合并需要共同祖先版本，这里简化为智能合并
+        return resolveMerge(conflict)
+    }
+    
+    private func resolveCreateBoth(_ conflict: ConflictInfo) -> ConflictResolutionResult {
+        // 创建两个版本的逻辑
+        let localCopyPath = conflict.filePath + ".local"
+        let remoteCopyPath = conflict.filePath + ".remote"
+        
+        // 这里应该创建两个文件，简化处理
+        return ConflictResolutionResult(
+            success: true,
+            resolvedVersion: conflict.localVersion,
+            strategy: .createBoth,
+            message: "创建了两个版本: \(localCopyPath) 和 \(remoteCopyPath)",
+            additionalFiles: [
+                (localCopyPath, conflict.localVersion),
+                (remoteCopyPath, conflict.remoteVersion)
+            ]
+        )
+    }
+    
+    private func performIntelligentMerge(local: String, remote: String, conflictRanges: [ConflictRange]?) -> String {
+        guard let ranges = conflictRanges, !ranges.isEmpty else {
+            // 没有具体冲突范围，尝试行级合并
+            return performLineMerge(local: local, remote: remote)
+        }
+        
+        var result = local
+        var offset = 0
+        
+        for range in ranges.sorted(by: { $0.startOffset < $1.startOffset }) {
+            let adjustedStart = range.startOffset + offset
+            let adjustedEnd = range.endOffset + offset
+            
+            // 智能选择合并策略
+            let mergedContent = chooseBestContent(
+                local: range.localContent,
+                remote: range.remoteContent,
+                context: (range.contextBefore, range.contextAfter)
+            )
+            
+            let startIndex = result.index(result.startIndex, offsetBy: adjustedStart)
+            let endIndex = result.index(result.startIndex, offsetBy: adjustedEnd)
+            
+            result.replaceSubrange(startIndex..<endIndex, with: mergedContent)
+            
+            offset += mergedContent.count - (adjustedEnd - adjustedStart)
+        }
+        
+        return result
+    }
+    
+    private func performLineMerge(local: String, remote: String) -> String {
+        let localLines = local.components(separatedBy: .newlines)
+        let remoteLines = remote.components(separatedBy: .newlines)
+        
+        var mergedLines: [String] = []
+        let maxLines = max(localLines.count, remoteLines.count)
+        
+        for i in 0..<maxLines {
+            let localLine = i < localLines.count ? localLines[i] : ""
+            let remoteLine = i < remoteLines.count ? remoteLines[i] : ""
+            
+            if localLine == remoteLine {
+                mergedLines.append(localLine)
+            } else if localLine.isEmpty {
+                mergedLines.append(remoteLine)
+            } else if remoteLine.isEmpty {
+                mergedLines.append(localLine)
+            } else {
+                // 冲突行，选择更长的或包含更多信息的
+                if localLine.count > remoteLine.count {
+                    mergedLines.append(localLine)
+                } else {
+                    mergedLines.append(remoteLine)
+                }
+            }
+        }
+        
+        return mergedLines.joined(separator: "\n")
+    }
+    
+    private func chooseBestContent(local: String, remote: String, context: (String, String)) -> String {
+        // 简单的启发式规则
+        if local.isEmpty && !remote.isEmpty {
+            return remote
+        } else if !local.isEmpty && remote.isEmpty {
+            return local
+        } else if local.count > remote.count {
+            return local
+        } else {
+            return remote
+        }
+    }
+    
+    private func mergeMetadata(_ local: [String: String], _ remote: [String: String]) -> [String: String] {
+        var merged = local
+        
+        for (key, remoteValue) in remote {
+            if let localValue = merged[key] {
+                // 如果本地也有这个键，选择更新的值（这里简化为远程值）
+                merged[key] = remoteValue
+            } else {
+                // 如果本地没有这个键，添加远程值
+                merged[key] = remoteValue
+            }
+        }
+        
+        return merged
+    }
+}
+
+// MARK: - 解决结果
+
+/// 冲突解决结果
+public struct ConflictResolutionResult {
+    public let success: Bool
+    public let resolvedVersion: FileVersion?
+    public let strategy: ResolutionStrategy
+    public let message: String
+    public let additionalFiles: [(String, FileVersion)]?
+    
+    public init(success: Bool, resolvedVersion: FileVersion?, strategy: ResolutionStrategy, message: String, additionalFiles: [(String, FileVersion)]? = nil) {
+        self.success = success
+        self.resolvedVersion = resolvedVersion
+        self.strategy = strategy
+        self.message = message
+        self.additionalFiles = additionalFiles
+    }
+}
+
+// MARK: - 扩展
+
+import CryptoKit

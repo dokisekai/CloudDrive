@@ -1,0 +1,465 @@
+//
+//  OperationalTransform.swift
+//  CloudDriveCore
+//
+//  操作转换算法实现 - 支持无冲突并发编辑
+//
+
+import Foundation
+
+// MARK: - 原子操作定义
+
+/// 原子操作类型
+public enum AtomicOperation: Codable, Equatable {
+    case insert(position: Int, content: String, timestamp: Date, deviceId: String, operationId: String)
+    case delete(position: Int, length: Int, timestamp: Date, deviceId: String, operationId: String)
+    case retain(length: Int)
+    case move(from: Int, to: Int, length: Int, timestamp: Date, deviceId: String, operationId: String)
+    case format(position: Int, length: Int, attributes: [String: String], timestamp: Date, deviceId: String, operationId: String)
+    
+    public var timestamp: Date {
+        switch self {
+        case .insert(_, _, let ts, _, _), .delete(_, _, let ts, _, _), 
+             .move(_, _, _, let ts, _, _), .format(_, _, _, let ts, _, _):
+            return ts
+        case .retain:
+            return Date.distantPast
+        }
+    }
+    
+    public var deviceId: String {
+        switch self {
+        case .insert(_, _, _, let id, _), .delete(_, _, _, let id, _), 
+             .move(_, _, _, _, let id, _), .format(_, _, _, _, let id, _):
+            return id
+        case .retain:
+            return ""
+        }
+    }
+    
+    public var operationId: String {
+        switch self {
+        case .insert(_, _, _, _, let opId), .delete(_, _, _, _, let opId), 
+             .move(_, _, _, _, _, let opId), .format(_, _, _, _, _, let opId):
+            return opId
+        case .retain:
+            return ""
+        }
+    }
+    
+    public var position: Int {
+        switch self {
+        case .insert(let pos, _, _, _, _), .delete(let pos, _, _, _, _), 
+             .format(let pos, _, _, _, _, _):
+            return pos
+        case .move(let from, _, _, _, _, _):
+            return from
+        case .retain:
+            return 0
+        }
+    }
+}
+
+// MARK: - 复合操作
+
+/// 复合操作 - 包含多个原子操作的事务
+public struct CompositeOperation: Codable {
+    public let operations: [AtomicOperation]
+    public let transactionId: String
+    public let vectorClock: [String: Int]
+    public let dependencies: [String] // 依赖的其他操作ID
+    public let timestamp: Date
+    
+    public init(operations: [AtomicOperation], transactionId: String = UUID().uuidString, vectorClock: [String: Int] = [:], dependencies: [String] = []) {
+        self.operations = operations
+        self.transactionId = transactionId
+        self.vectorClock = vectorClock
+        self.dependencies = dependencies
+        self.timestamp = Date()
+    }
+    
+    /// 检查两个复合操作是否可交换
+    public func isCommutative(with other: CompositeOperation) -> Bool {
+        for op1 in operations {
+            for op2 in other.operations {
+                if !areCommutative(op1, op2) {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+    
+    private func areCommutative(_ op1: AtomicOperation, _ op2: AtomicOperation) -> Bool {
+        switch (op1, op2) {
+        case (.insert(let pos1, _, _, _, _), .insert(let pos2, _, _, _, _)):
+            return pos1 != pos2
+        case (.delete(let pos1, let len1, _, _, _), .delete(let pos2, let len2, _, _, _)):
+            return pos1 + len1 <= pos2 || pos2 + len2 <= pos1
+        case (.insert(let pos1, _, _, _, _), .delete(let pos2, let len2, _, _, _)):
+            return pos1 <= pos2 || pos1 >= pos2 + len2
+        case (.delete(let pos1, let len1, _, _, _), .insert(let pos2, _, _, _, _)):
+            return pos2 <= pos1 || pos2 >= pos1 + len1
+        default:
+            return false
+        }
+    }
+}
+
+// MARK: - 向量时钟管理
+
+/// 向量时钟管理器
+public class VectorClockManager {
+    private var clock: [String: Int] = [:]
+    private let deviceId: String
+    
+    public init(deviceId: String) {
+        self.deviceId = deviceId
+        self.clock[deviceId] = 0
+    }
+    
+    public func tick() {
+        clock[deviceId, default: 0] += 1
+    }
+    
+    public func update(with otherClock: [String: Int]) {
+        for (device, timestamp) in otherClock {
+            clock[device] = max(clock[device, default: 0], timestamp)
+        }
+        tick()
+    }
+    
+    public func compare(_ clock1: [String: Int], _ clock2: [String: Int]) -> VectorClockComparison {
+        var isLessOrEqual = true
+        var isGreaterOrEqual = true
+        
+        let allDevices = Set(clock1.keys).union(Set(clock2.keys))
+        
+        for device in allDevices {
+            let time1 = clock1[device, default: 0]
+            let time2 = clock2[device, default: 0]
+            
+            if time1 > time2 {
+                isLessOrEqual = false
+            }
+            if time1 < time2 {
+                isGreaterOrEqual = false
+            }
+        }
+        
+        if isLessOrEqual && isGreaterOrEqual {
+            return .equal
+        } else if isLessOrEqual {
+            return .before
+        } else if isGreaterOrEqual {
+            return .after
+        } else {
+            return .concurrent
+        }
+    }
+    
+    public func getClock() -> [String: Int] {
+        return clock
+    }
+}
+
+public enum VectorClockComparison {
+    case before, after, equal, concurrent
+}
+
+// MARK: - 高级操作转换引擎
+
+/// 高级操作转换引擎
+public class AdvancedOperationalTransform {
+    private var operationHistory: [CompositeOperation] = []
+    private var transformationCache: [String: CompositeOperation] = [:]
+    private let vectorClockManager: VectorClockManager
+    
+    public init(deviceId: String) {
+        self.vectorClockManager = VectorClockManager(deviceId: deviceId)
+    }
+    
+    /// 转换操作
+    public func transform(_ op1: CompositeOperation, against op2: CompositeOperation) -> CompositeOperation {
+        let cacheKey = "\(op1.transactionId)-\(op2.transactionId)"
+        
+        if let cached = transformationCache[cacheKey] {
+            return cached
+        }
+        
+        let transformed = performTransformation(op1, against: op2)
+        transformationCache[cacheKey] = transformed
+        
+        return transformed
+    }
+    
+    private func performTransformation(
+        _ op1: CompositeOperation, 
+        against op2: CompositeOperation
+    ) -> CompositeOperation {
+        var transformedOps: [AtomicOperation] = []
+        
+        for atomicOp1 in op1.operations {
+            var currentOp = atomicOp1
+            
+            // 对每个原子操作应用转换
+            for atomicOp2 in op2.operations {
+                currentOp = transformAtomic(currentOp, against: atomicOp2)
+            }
+            
+            transformedOps.append(currentOp)
+        }
+        
+        return CompositeOperation(
+            operations: transformedOps,
+            transactionId: op1.transactionId,
+            vectorClock: mergeVectorClocks(op1.vectorClock, op2.vectorClock),
+            dependencies: op1.dependencies + [op2.transactionId]
+        )
+    }
+    
+    private func transformAtomic(_ op1: AtomicOperation, against op2: AtomicOperation) -> AtomicOperation {
+        switch (op1, op2) {
+        case (.insert(let pos1, let content1, let ts1, let dev1, let id1), 
+              .insert(let pos2, let content2, let ts2, let dev2, let id2)):
+            return transformInsertInsert(pos1, content1, ts1, dev1, id1, pos2, content2, ts2, dev2, id2)
+            
+        case (.insert(let pos1, let content1, let ts1, let dev1, let id1), 
+              .delete(let pos2, let len2, let ts2, let dev2, let id2)):
+            return transformInsertDelete(pos1, content1, ts1, dev1, id1, pos2, len2, ts2, dev2, id2)
+            
+        case (.delete(let pos1, let len1, let ts1, let dev1, let id1), 
+              .insert(let pos2, let content2, let ts2, let dev2, let id2)):
+            return transformDeleteInsert(pos1, len1, ts1, dev1, id1, pos2, content2, ts2, dev2, id2)
+            
+        case (.delete(let pos1, let len1, let ts1, let dev1, let id1), 
+              .delete(let pos2, let len2, let ts2, let dev2, let id2)):
+            return transformDeleteDelete(pos1, len1, ts1, dev1, id1, pos2, len2, ts2, dev2, id2)
+            
+        case (.move(let from1, let to1, let len1, let ts1, let dev1, let id1), 
+              .move(let from2, let to2, let len2, let ts2, let dev2, let id2)):
+            return transformMoveMove(from1, to1, len1, ts1, dev1, id1, from2, to2, len2, ts2, dev2, id2)
+            
+        case (.insert(let pos1, let content1, let ts1, let dev1, let id1), 
+              .move(let from2, let to2, let len2, let ts2, let dev2, let id2)):
+            return transformInsertMove(pos1, content1, ts1, dev1, id1, from2, to2, len2, ts2, dev2, id2)
+            
+        case (.move(let from1, let to1, let len1, let ts1, let dev1, let id1), 
+              .insert(let pos2, let content2, let ts2, let dev2, let id2)):
+            return transformMoveInsert(from1, to1, len1, ts1, dev1, id1, pos2, content2, ts2, dev2, id2)
+            
+        default:
+            return op1
+        }
+    }
+    
+    // MARK: - 具体转换实现
+    
+    private func transformInsertInsert(
+        _ pos1: Int, _ content1: String, _ ts1: Date, _ dev1: String, _ id1: String,
+        _ pos2: Int, _ content2: String, _ ts2: Date, _ dev2: String, _ id2: String
+    ) -> AtomicOperation {
+        if pos1 < pos2 {
+            return .insert(position: pos1, content: content1, timestamp: ts1, deviceId: dev1, operationId: id1)
+        } else if pos1 > pos2 {
+            return .insert(position: pos1 + content2.count, content: content1, timestamp: ts1, deviceId: dev1, operationId: id1)
+        } else {
+            // 同一位置插入，使用确定性规则
+            let priority1 = calculatePriority(timestamp: ts1, deviceId: dev1, operationId: id1)
+            let priority2 = calculatePriority(timestamp: ts2, deviceId: dev2, operationId: id2)
+            
+            if priority1 > priority2 {
+                return .insert(position: pos1, content: content1, timestamp: ts1, deviceId: dev1, operationId: id1)
+            } else {
+                return .insert(position: pos1 + content2.count, content: content1, timestamp: ts1, deviceId: dev1, operationId: id1)
+            }
+        }
+    }
+    
+    private func transformInsertDelete(
+        _ pos1: Int, _ content1: String, _ ts1: Date, _ dev1: String, _ id1: String,
+        _ pos2: Int, _ len2: Int, _ ts2: Date, _ dev2: String, _ id2: String
+    ) -> AtomicOperation {
+        if pos1 <= pos2 {
+            return .insert(position: pos1, content: content1, timestamp: ts1, deviceId: dev1, operationId: id1)
+        } else if pos1 >= pos2 + len2 {
+            return .insert(position: pos1 - len2, content: content1, timestamp: ts1, deviceId: dev1, operationId: id1)
+        } else {
+            // 插入位置在删除范围内，移动到删除位置
+            return .insert(position: pos2, content: content1, timestamp: ts1, deviceId: dev1, operationId: id1)
+        }
+    }
+    
+    private func transformDeleteInsert(
+        _ pos1: Int, _ len1: Int, _ ts1: Date, _ dev1: String, _ id1: String,
+        _ pos2: Int, _ content2: String, _ ts2: Date, _ dev2: String, _ id2: String
+    ) -> AtomicOperation {
+        if pos2 <= pos1 {
+            return .delete(position: pos1 + content2.count, length: len1, timestamp: ts1, deviceId: dev1, operationId: id1)
+        } else if pos2 >= pos1 + len1 {
+            return .delete(position: pos1, length: len1, timestamp: ts1, deviceId: dev1, operationId: id1)
+        } else {
+            // 插入位置在删除范围内，分割删除操作
+            let beforeLen = pos2 - pos1
+            return .delete(position: pos1, length: beforeLen, timestamp: ts1, deviceId: dev1, operationId: id1)
+        }
+    }
+    
+    private func transformDeleteDelete(
+        _ pos1: Int, _ len1: Int, _ ts1: Date, _ dev1: String, _ id1: String,
+        _ pos2: Int, _ len2: Int, _ ts2: Date, _ dev2: String, _ id2: String
+    ) -> AtomicOperation {
+        if pos1 + len1 <= pos2 {
+            // 删除范围不重叠，在前面
+            return .delete(position: pos1, length: len1, timestamp: ts1, deviceId: dev1, operationId: id1)
+        } else if pos2 + len2 <= pos1 {
+            // 删除范围不重叠，在后面
+            return .delete(position: pos1 - len2, length: len1, timestamp: ts1, deviceId: dev1, operationId: id1)
+        } else {
+            // 删除范围重叠，需要调整
+            if pos1 < pos2 {
+                // 删除前半部分
+                return .delete(position: pos1, length: pos2 - pos1, timestamp: ts1, deviceId: dev1, operationId: id1)
+            } else {
+                // 删除操作被完全覆盖，转换为保留操作
+                return .retain(length: 0)
+            }
+        }
+    }
+    
+    private func transformMoveMove(
+        _ from1: Int, _ to1: Int, _ len1: Int, _ ts1: Date, _ dev1: String, _ id1: String,
+        _ from2: Int, _ to2: Int, _ len2: Int, _ ts2: Date, _ dev2: String, _ id2: String
+    ) -> AtomicOperation {
+        var newFrom = from1
+        var newTo = to1
+        
+        // 调整源位置
+        if from2 < from1 {
+            if from2 + len2 <= from1 {
+                newFrom = from1 - len2
+            } else if from2 < from1 + len1 {
+                // 重叠情况，需要特殊处理
+                newFrom = from2
+            }
+        }
+        
+        // 调整目标位置
+        if to2 <= to1 {
+            newTo = to1 + len2
+        }
+        
+        return .move(from: newFrom, to: newTo, length: len1, timestamp: ts1, deviceId: dev1, operationId: id1)
+    }
+    
+    private func transformInsertMove(
+        _ pos1: Int, _ content1: String, _ ts1: Date, _ dev1: String, _ id1: String,
+        _ from2: Int, _ to2: Int, _ len2: Int, _ ts2: Date, _ dev2: String, _ id2: String
+    ) -> AtomicOperation {
+        var newPos = pos1
+        
+        if pos1 > from2 && pos1 <= from2 + len2 {
+            // 插入位置在移动的源范围内
+            newPos = to2 + (pos1 - from2)
+        } else if pos1 > from2 {
+            // 插入位置在移动源之后
+            newPos = pos1 - len2
+        }
+        
+        if newPos >= to2 {
+            // 插入位置在移动目标之后
+            newPos = newPos + len2
+        }
+        
+        return .insert(position: newPos, content: content1, timestamp: ts1, deviceId: dev1, operationId: id1)
+    }
+    
+    private func transformMoveInsert(
+        _ from1: Int, _ to1: Int, _ len1: Int, _ ts1: Date, _ dev1: String, _ id1: String,
+        _ pos2: Int, _ content2: String, _ ts2: Date, _ dev2: String, _ id2: String
+    ) -> AtomicOperation {
+        var newFrom = from1
+        var newTo = to1
+        
+        if pos2 <= from1 {
+            newFrom = from1 + content2.count
+        } else if pos2 < from1 + len1 {
+            // 插入在移动范围内，不调整源位置
+        }
+        
+        if pos2 <= to1 {
+            newTo = to1 + content2.count
+        }
+        
+        return .move(from: newFrom, to: newTo, length: len1, timestamp: ts1, deviceId: dev1, operationId: id1)
+    }
+    
+    // MARK: - 辅助方法
+    
+    private func calculatePriority(timestamp: Date, deviceId: String, operationId: String) -> Double {
+        // 综合时间戳、设备ID和操作ID计算优先级
+        let timePriority = timestamp.timeIntervalSince1970
+        let devicePriority = Double(deviceId.hashValue)
+        let operationPriority = Double(operationId.hashValue)
+        
+        return timePriority + devicePriority * 0.001 + operationPriority * 0.000001
+    }
+    
+    private func mergeVectorClocks(_ clock1: [String: Int], _ clock2: [String: Int]) -> [String: Int] {
+        var merged = clock1
+        for (device, timestamp) in clock2 {
+            merged[device] = max(merged[device, default: 0], timestamp)
+        }
+        return merged
+    }
+    
+    /// 应用操作到文本内容
+    public func applyOperation(_ operation: AtomicOperation, to content: String) -> String {
+        var result = content
+        
+        switch operation {
+        case .insert(let position, let insertContent, _, _, _):
+            let index = result.index(result.startIndex, offsetBy: min(position, result.count))
+            result.insert(contentsOf: insertContent, at: index)
+            
+        case .delete(let position, let length, _, _, _):
+            let startIndex = result.index(result.startIndex, offsetBy: min(position, result.count))
+            let endIndex = result.index(startIndex, offsetBy: min(length, result.count - position))
+            result.removeSubrange(startIndex..<endIndex)
+            
+        case .move(let from, let to, let length, _, _, _):
+            let fromIndex = result.index(result.startIndex, offsetBy: min(from, result.count))
+            let fromEndIndex = result.index(fromIndex, offsetBy: min(length, result.count - from))
+            let movedContent = String(result[fromIndex..<fromEndIndex])
+            
+            result.removeSubrange(fromIndex..<fromEndIndex)
+            
+            let toIndex = result.index(result.startIndex, offsetBy: min(to, result.count))
+            result.insert(contentsOf: movedContent, at: toIndex)
+            
+        case .retain:
+            break
+            
+        case .format:
+            // 格式化操作不改变文本内容，只改变样式
+            break
+        }
+        
+        return result
+    }
+    
+    /// 转换操作序列
+    public func transformSequence(_ ops1: [AtomicOperation], against ops2: [AtomicOperation]) -> [AtomicOperation] {
+        var result: [AtomicOperation] = []
+        
+        for op1 in ops1 {
+            var transformedOp = op1
+            for op2 in ops2 {
+                transformedOp = transformAtomic(transformedOp, against: op2)
+            }
+            result.append(transformedOp)
+        }
+        
+        return result
+    }
+}

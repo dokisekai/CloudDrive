@@ -1,0 +1,570 @@
+//
+//  CRDTDataStructures.swift
+//  CloudDriveCore
+//
+//  无冲突复制数据类型(CRDT)实现 - 保证分布式一致性
+//
+
+import Foundation
+
+// MARK: - CRDT基础协议
+
+/// CRDT基础协议
+public protocol CRDT {
+    associatedtype State
+    
+    /// 合并两个CRDT状态
+    func merge(with other: Self) -> Self
+    
+    /// 获取当前状态
+    func getState() -> State
+    
+    /// 比较两个CRDT是否相等
+    func isEqual(to other: Self) -> Bool
+}
+
+// MARK: - G-Counter (增长计数器)
+
+/// G-Counter - 只能增长的分布式计数器
+public struct GCounter: CRDT, Codable {
+    public typealias State = Int
+    
+    private var counters: [String: Int] = [:]
+    private let nodeId: String
+    
+    public init(nodeId: String) {
+        self.nodeId = nodeId
+        self.counters[nodeId] = 0
+    }
+    
+    public mutating func increment() {
+        counters[nodeId, default: 0] += 1
+    }
+    
+    public func merge(with other: GCounter) -> GCounter {
+        var merged = GCounter(nodeId: nodeId)
+        
+        let allNodes = Set(counters.keys).union(Set(other.counters.keys))
+        for node in allNodes {
+            merged.counters[node] = max(counters[node, default: 0], other.counters[node, default: 0])
+        }
+        
+        return merged
+    }
+    
+    public func getState() -> Int {
+        return counters.values.reduce(0, +)
+    }
+    
+    public func isEqual(to other: GCounter) -> Bool {
+        return counters == other.counters
+    }
+}
+
+// MARK: - PN-Counter (增减计数器)
+
+/// PN-Counter - 可增可减的分布式计数器
+public struct PNCounter: CRDT, Codable {
+    public typealias State = Int
+    
+    private var positiveCounter: GCounter
+    private var negativeCounter: GCounter
+    
+    public init(nodeId: String) {
+        self.positiveCounter = GCounter(nodeId: nodeId)
+        self.negativeCounter = GCounter(nodeId: nodeId)
+    }
+    
+    public mutating func increment() {
+        positiveCounter.increment()
+    }
+    
+    public mutating func decrement() {
+        negativeCounter.increment()
+    }
+    
+    public func merge(with other: PNCounter) -> PNCounter {
+        var merged = PNCounter(nodeId: positiveCounter.nodeId)
+        merged.positiveCounter = positiveCounter.merge(with: other.positiveCounter)
+        merged.negativeCounter = negativeCounter.merge(with: other.negativeCounter)
+        return merged
+    }
+    
+    public func getState() -> Int {
+        return positiveCounter.getState() - negativeCounter.getState()
+    }
+    
+    public func isEqual(to other: PNCounter) -> Bool {
+        return positiveCounter.isEqual(to: other.positiveCounter) && 
+               negativeCounter.isEqual(to: other.negativeCounter)
+    }
+}
+
+// MARK: - G-Set (增长集合)
+
+/// G-Set - 只能添加元素的分布式集合
+public struct GSet<Element: Hashable & Codable>: CRDT, Codable {
+    public typealias State = Set<Element>
+    
+    private var elements: Set<Element> = []
+    
+    public init() {}
+    
+    public mutating func add(_ element: Element) {
+        elements.insert(element)
+    }
+    
+    public func contains(_ element: Element) -> Bool {
+        return elements.contains(element)
+    }
+    
+    public func merge(with other: GSet<Element>) -> GSet<Element> {
+        var merged = GSet<Element>()
+        merged.elements = elements.union(other.elements)
+        return merged
+    }
+    
+    public func getState() -> Set<Element> {
+        return elements
+    }
+    
+    public func isEqual(to other: GSet<Element>) -> Bool {
+        return elements == other.elements
+    }
+}
+
+// MARK: - 2P-Set (两阶段集合)
+
+/// 2P-Set - 可添加和删除元素的分布式集合
+public struct TwoPSet<Element: Hashable & Codable>: CRDT, Codable {
+    public typealias State = Set<Element>
+    
+    private var addedSet: GSet<Element> = GSet<Element>()
+    private var removedSet: GSet<Element> = GSet<Element>()
+    
+    public init() {}
+    
+    public mutating func add(_ element: Element) {
+        addedSet.add(element)
+    }
+    
+    public mutating func remove(_ element: Element) {
+        if addedSet.contains(element) {
+            removedSet.add(element)
+        }
+    }
+    
+    public func contains(_ element: Element) -> Bool {
+        return addedSet.contains(element) && !removedSet.contains(element)
+    }
+    
+    public func merge(with other: TwoPSet<Element>) -> TwoPSet<Element> {
+        var merged = TwoPSet<Element>()
+        merged.addedSet = addedSet.merge(with: other.addedSet)
+        merged.removedSet = removedSet.merge(with: other.removedSet)
+        return merged
+    }
+    
+    public func getState() -> Set<Element> {
+        return addedSet.getState().subtracting(removedSet.getState())
+    }
+    
+    public func isEqual(to other: TwoPSet<Element>) -> Bool {
+        return addedSet.isEqual(to: other.addedSet) && removedSet.isEqual(to: other.removedSet)
+    }
+}
+
+// MARK: - LWW-Register (最后写入获胜寄存器)
+
+/// LWW-Register - 最后写入获胜的分布式寄存器
+public struct LWWRegister<Value: Codable>: CRDT, Codable {
+    public typealias State = Value?
+    
+    private var value: Value?
+    private var timestamp: Date
+    private var nodeId: String
+    
+    public init(nodeId: String) {
+        self.nodeId = nodeId
+        self.timestamp = Date.distantPast
+    }
+    
+    public mutating func set(_ newValue: Value) {
+        self.value = newValue
+        self.timestamp = Date()
+    }
+    
+    public func merge(with other: LWWRegister<Value>) -> LWWRegister<Value> {
+        var merged = LWWRegister<Value>(nodeId: nodeId)
+        
+        if timestamp > other.timestamp {
+            merged.value = value
+            merged.timestamp = timestamp
+        } else if timestamp < other.timestamp {
+            merged.value = other.value
+            merged.timestamp = other.timestamp
+        } else {
+            // 时间戳相同，使用节点ID作为决定因子
+            if nodeId > other.nodeId {
+                merged.value = value
+                merged.timestamp = timestamp
+            } else {
+                merged.value = other.value
+                merged.timestamp = other.timestamp
+            }
+        }
+        
+        return merged
+    }
+    
+    public func getState() -> Value? {
+        return value
+    }
+    
+    public func isEqual(to other: LWWRegister<Value>) -> Bool {
+        // 需要实现Value的比较，这里简化处理
+        return timestamp == other.timestamp && nodeId == other.nodeId
+    }
+}
+
+// MARK: - OR-Set (观察-删除集合)
+
+/// OR-Set - 支持并发添加和删除的分布式集合
+public struct ORSet<Element: Hashable & Codable>: CRDT, Codable {
+    public typealias State = Set<Element>
+    
+    private struct ElementTag: Hashable, Codable {
+        let element: Element
+        let nodeId: String
+        let timestamp: Date
+        let uniqueId: String
+    }
+    
+    private var addedTags: Set<ElementTag> = []
+    private var removedTags: Set<ElementTag> = []
+    private let nodeId: String
+    
+    public init(nodeId: String) {
+        self.nodeId = nodeId
+    }
+    
+    public mutating func add(_ element: Element) {
+        let tag = ElementTag(
+            element: element,
+            nodeId: nodeId,
+            timestamp: Date(),
+            uniqueId: UUID().uuidString
+        )
+        addedTags.insert(tag)
+    }
+    
+    public mutating func remove(_ element: Element) {
+        let tagsToRemove = addedTags.filter { $0.element == element }
+        removedTags.formUnion(tagsToRemove)
+    }
+    
+    public func contains(_ element: Element) -> Bool {
+        let elementAddedTags = addedTags.filter { $0.element == element }
+        let elementRemovedTags = removedTags.filter { $0.element == element }
+        
+        return !elementAddedTags.subtracting(elementRemovedTags).isEmpty
+    }
+    
+    public func merge(with other: ORSet<Element>) -> ORSet<Element> {
+        var merged = ORSet<Element>(nodeId: nodeId)
+        merged.addedTags = addedTags.union(other.addedTags)
+        merged.removedTags = removedTags.union(other.removedTags)
+        return merged
+    }
+    
+    public func getState() -> Set<Element> {
+        var result: Set<Element> = []
+        
+        for tag in addedTags {
+            if !removedTags.contains(tag) {
+                result.insert(tag.element)
+            }
+        }
+        
+        return result
+    }
+    
+    public func isEqual(to other: ORSet<Element>) -> Bool {
+        return addedTags == other.addedTags && removedTags == other.removedTags
+    }
+}
+
+// MARK: - RGA (复制增长数组)
+
+/// RGA - 支持并发插入和删除的分布式序列
+public struct RGA<Element: Codable>: CRDT, Codable {
+    public typealias State = [Element]
+    
+    private struct RGAElement: Codable {
+        let element: Element
+        let nodeId: String
+        let timestamp: Date
+        let uniqueId: String
+        var isDeleted: Bool = false
+        
+        init(element: Element, nodeId: String) {
+            self.element = element
+            self.nodeId = nodeId
+            self.timestamp = Date()
+            self.uniqueId = UUID().uuidString
+        }
+    }
+    
+    private var elements: [RGAElement] = []
+    private let nodeId: String
+    
+    public init(nodeId: String) {
+        self.nodeId = nodeId
+    }
+    
+    public mutating func insert(_ element: Element, at index: Int) {
+        let rgaElement = RGAElement(element: element, nodeId: nodeId)
+        
+        if index >= elements.count {
+            elements.append(rgaElement)
+        } else {
+            elements.insert(rgaElement, at: index)
+        }
+    }
+    
+    public mutating func remove(at index: Int) {
+        guard index < elements.count else { return }
+        elements[index].isDeleted = true
+    }
+    
+    public func merge(with other: RGA<Element>) -> RGA<Element> {
+        var merged = RGA<Element>(nodeId: nodeId)
+        
+        // 合并所有元素
+        var allElements = elements + other.elements
+        
+        // 按时间戳排序，确保一致的顺序
+        allElements.sort { elem1, elem2 in
+            if elem1.timestamp != elem2.timestamp {
+                return elem1.timestamp < elem2.timestamp
+            }
+            return elem1.nodeId < elem2.nodeId
+        }
+        
+        // 去重并保持删除状态
+        var uniqueElements: [String: RGAElement] = [:]
+        for element in allElements {
+            if let existing = uniqueElements[element.uniqueId] {
+                // 保持删除状态的合并
+                var mergedElement = RGAElement(
+                    element: element.element,
+                    nodeId: element.nodeId
+                )
+                mergedElement.isDeleted = existing.isDeleted || element.isDeleted
+                uniqueElements[element.uniqueId] = mergedElement
+            } else {
+                uniqueElements[element.uniqueId] = element
+            }
+        }
+        
+        merged.elements = Array(uniqueElements.values).sorted { elem1, elem2 in
+            if elem1.timestamp != elem2.timestamp {
+                return elem1.timestamp < elem2.timestamp
+            }
+            return elem1.nodeId < elem2.nodeId
+        }
+        
+        return merged
+    }
+    
+    public func getState() -> [Element] {
+        return elements.compactMap { $0.isDeleted ? nil : $0.element }
+    }
+    
+    public func isEqual(to other: RGA<Element>) -> Bool {
+        return elements.count == other.elements.count &&
+               zip(elements, other.elements).allSatisfy { elem1, elem2 in
+                   elem1.uniqueId == elem2.uniqueId && elem1.isDeleted == elem2.isDeleted
+               }
+    }
+}
+
+// MARK: - CRDT文档结构
+
+/// CRDT文档 - 组合多种CRDT类型的文档结构
+public struct CRDTDocument: CRDT, Codable {
+    public typealias State = [String: Any]
+    
+    private var metadata: LWWRegister<DocumentMetadata>
+    private var content: RGA<Character>
+    private var tags: ORSet<String>
+    private var permissions: TwoPSet<Permission>
+    private var version: GCounter
+    private let nodeId: String
+    
+    public struct DocumentMetadata: Codable {
+        let title: String
+        let author: String
+        let createdAt: Date
+        let modifiedAt: Date
+        let mimeType: String
+        let size: Int64
+    }
+    
+    public struct Permission: Hashable, Codable {
+        let userId: String
+        let permission: String // "read", "write", "admin"
+    }
+    
+    public init(nodeId: String) {
+        self.nodeId = nodeId
+        self.metadata = LWWRegister<DocumentMetadata>(nodeId: nodeId)
+        self.content = RGA<Character>(nodeId: nodeId)
+        self.tags = ORSet<String>(nodeId: nodeId)
+        self.permissions = TwoPSet<Permission>()
+        self.version = GCounter(nodeId: nodeId)
+    }
+    
+    public mutating func updateMetadata(_ newMetadata: DocumentMetadata) {
+        metadata.set(newMetadata)
+        version.increment()
+    }
+    
+    public mutating func insertText(_ text: String, at index: Int) {
+        for (offset, char) in text.enumerated() {
+            content.insert(char, at: index + offset)
+        }
+        version.increment()
+    }
+    
+    public mutating func deleteText(at index: Int, length: Int) {
+        for _ in 0..<length {
+            content.remove(at: index)
+        }
+        version.increment()
+    }
+    
+    public mutating func addTag(_ tag: String) {
+        tags.add(tag)
+        version.increment()
+    }
+    
+    public mutating func removeTag(_ tag: String) {
+        tags.remove(tag)
+        version.increment()
+    }
+    
+    public mutating func addPermission(_ permission: Permission) {
+        permissions.add(permission)
+        version.increment()
+    }
+    
+    public mutating func removePermission(_ permission: Permission) {
+        permissions.remove(permission)
+        version.increment()
+    }
+    
+    public func merge(with other: CRDTDocument) -> CRDTDocument {
+        var merged = CRDTDocument(nodeId: nodeId)
+        merged.metadata = metadata.merge(with: other.metadata)
+        merged.content = content.merge(with: other.content)
+        merged.tags = tags.merge(with: other.tags)
+        merged.permissions = permissions.merge(with: other.permissions)
+        merged.version = version.merge(with: other.version)
+        return merged
+    }
+    
+    public func getState() -> [String: Any] {
+        return [
+            "metadata": metadata.getState() as Any,
+            "content": String(content.getState()),
+            "tags": Array(tags.getState()),
+            "permissions": Array(permissions.getState()),
+            "version": version.getState()
+        ]
+    }
+    
+    public func isEqual(to other: CRDTDocument) -> Bool {
+        return metadata.isEqual(to: other.metadata) &&
+               content.isEqual(to: other.content) &&
+               tags.isEqual(to: other.tags) &&
+               permissions.isEqual(to: other.permissions) &&
+               version.isEqual(to: other.version)
+    }
+    
+    public func getText() -> String {
+        return String(content.getState())
+    }
+    
+    public func getMetadata() -> DocumentMetadata? {
+        return metadata.getState()
+    }
+    
+    public func getTags() -> Set<String> {
+        return tags.getState()
+    }
+    
+    public func getPermissions() -> Set<Permission> {
+        return permissions.getState()
+    }
+    
+    public func getVersion() -> Int {
+        return version.getState()
+    }
+}
+
+// MARK: - CRDT管理器
+
+/// CRDT管理器 - 管理文档的CRDT操作和同步
+public class CRDTManager {
+    private var documents: [String: CRDTDocument] = [:]
+    private let nodeId: String
+    
+    public init(nodeId: String) {
+        self.nodeId = nodeId
+    }
+    
+    public func createDocument(id: String, metadata: CRDTDocument.DocumentMetadata) {
+        var document = CRDTDocument(nodeId: nodeId)
+        document.updateMetadata(metadata)
+        documents[id] = document
+    }
+    
+    public func getDocument(id: String) -> CRDTDocument? {
+        return documents[id]
+    }
+    
+    public func updateDocument(id: String, with remoteDocument: CRDTDocument) {
+        if let localDocument = documents[id] {
+            documents[id] = localDocument.merge(with: remoteDocument)
+        } else {
+            documents[id] = remoteDocument
+        }
+    }
+    
+    public func getAllDocuments() -> [String: CRDTDocument] {
+        return documents
+    }
+    
+    public func removeDocument(id: String) {
+        documents.removeValue(forKey: id)
+    }
+    
+    /// 生成同步增量
+    public func generateSyncDelta(for documentId: String, since version: Int) -> CRDTDocument? {
+        guard let document = documents[documentId] else { return nil }
+        
+        // 简化实现：返回完整文档
+        // 实际实现中应该只返回指定版本之后的变更
+        if document.getVersion() > version {
+            return document
+        }
+        
+        return nil
+    }
+    
+    /// 应用同步增量
+    public func applySyncDelta(documentId: String, delta: CRDTDocument) {
+        updateDocument(id: documentId, with: delta)
+    }
+}

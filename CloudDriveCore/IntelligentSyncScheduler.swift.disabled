@@ -1,0 +1,650 @@
+//
+//  IntelligentSyncScheduler.swift
+//  CloudDriveCore
+//
+//  智能同步调度器 - 自适应同步策略和优先级管理
+//
+
+import Foundation
+import Network
+import Combine
+
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
+// MARK: - 同步优先级
+
+/// 同步优先级枚举
+public enum SyncPriority: Int, CaseIterable, Codable, Comparable {
+    case critical = 5       // 关键文件，立即同步
+    case high = 4          // 高优先级，优先同步
+    case normal = 3        // 正常优先级
+    case low = 2           // 低优先级，延迟同步
+    case background = 1    // 后台同步，空闲时进行
+    
+    public static func < (lhs: SyncPriority, rhs: SyncPriority) -> Bool {
+        return lhs.rawValue < rhs.rawValue
+    }
+    
+    public var description: String {
+        switch self {
+        case .critical: return "关键"
+        case .high: return "高"
+        case .normal: return "正常"
+        case .low: return "低"
+        case .background: return "后台"
+        }
+    }
+    
+    public var maxRetryCount: Int {
+        switch self {
+        case .critical: return 10
+        case .high: return 5
+        case .normal: return 3
+        case .low: return 2
+        case .background: return 1
+        }
+    }
+    
+    public var retryDelay: TimeInterval {
+        switch self {
+        case .critical: return 1.0
+        case .high: return 5.0
+        case .normal: return 15.0
+        case .low: return 60.0
+        case .background: return 300.0
+        }
+    }
+}
+
+// MARK: - 同步任务
+
+/// 同步任务
+public struct SyncTask: Codable, Identifiable {
+    public let id: String
+    public let filePath: String
+    public let operation: SyncOperation
+    public let priority: SyncPriority
+    public let createdAt: Date
+    public var scheduledAt: Date?
+    public var startedAt: Date?
+    public var completedAt: Date?
+    public var retryCount: Int
+    public var lastError: String?
+    public let dependencies: [String] // 依赖的其他任务ID
+    public let estimatedSize: Int64
+    public let deviceId: String
+    public let userId: String
+    
+    public init(
+        filePath: String,
+        operation: SyncOperation,
+        priority: SyncPriority = .normal,
+        dependencies: [String] = [],
+        estimatedSize: Int64 = 0,
+        deviceId: String,
+        userId: String
+    ) {
+        self.id = UUID().uuidString
+        self.filePath = filePath
+        self.operation = operation
+        self.priority = priority
+        self.createdAt = Date()
+        self.retryCount = 0
+        self.dependencies = dependencies
+        self.estimatedSize = estimatedSize
+        self.deviceId = deviceId
+        self.userId = userId
+    }
+    
+    public var isCompleted: Bool {
+        return completedAt != nil
+    }
+    
+    public var isRunning: Bool {
+        return startedAt != nil && completedAt == nil
+    }
+    
+    public var canRetry: Bool {
+        return retryCount < priority.maxRetryCount
+    }
+    
+    public var nextRetryTime: Date? {
+        guard canRetry else { return nil }
+        let delay = priority.retryDelay * pow(2.0, Double(retryCount)) // 指数退避
+        return Date().addingTimeInterval(delay)
+    }
+}
+
+/// 同步操作类型
+public enum SyncOperation: String, Codable {
+    case upload = "upload"
+    case download = "download"
+    case delete = "delete"
+    case move = "move"
+    case copy = "copy"
+    case metadata = "metadata"
+    case conflict = "conflict"
+    case verify = "verify"
+    
+    public var description: String {
+        switch self {
+        case .upload: return "上传"
+        case .download: return "下载"
+        case .delete: return "删除"
+        case .move: return "移动"
+        case .copy: return "复制"
+        case .metadata: return "元数据"
+        case .conflict: return "冲突解决"
+        case .verify: return "验证"
+        }
+    }
+    
+    public var estimatedDuration: TimeInterval {
+        switch self {
+        case .upload, .download: return 10.0
+        case .delete: return 1.0
+        case .move, .copy: return 5.0
+        case .metadata: return 2.0
+        case .conflict: return 15.0
+        case .verify: return 3.0
+        }
+    }
+}
+
+// MARK: - 网络状态监控
+
+/// 网络状态
+public enum NetworkStatus {
+    case unavailable
+    case wifi
+    case cellular
+    case ethernet
+    
+    public var isFastConnection: Bool {
+        switch self {
+        case .wifi, .ethernet: return true
+        case .cellular, .unavailable: return false
+        }
+    }
+    
+    public var maxConcurrentTasks: Int {
+        switch self {
+        case .ethernet: return 10
+        case .wifi: return 6
+        case .cellular: return 2
+        case .unavailable: return 0
+        }
+    }
+    
+    public var maxBandwidthUsage: Double {
+        switch self {
+        case .ethernet: return 1.0
+        case .wifi: return 0.8
+        case .cellular: return 0.3
+        case .unavailable: return 0.0
+        }
+    }
+}
+
+/// 网络监控器
+public class NetworkMonitor: ObservableObject {
+    @Published public var status: NetworkStatus = .unavailable
+    @Published public var isExpensive: Bool = false
+    @Published public var isConstrained: Bool = false
+    
+    private let monitor = NWPathMonitor()
+    private let queue = DispatchQueue(label: "NetworkMonitor")
+    
+    public init() {
+        startMonitoring()
+    }
+    
+    private func startMonitoring() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                self?.updateStatus(path)
+            }
+        }
+        monitor.start(queue: queue)
+    }
+    
+    private func updateStatus(_ path: NWPath) {
+        if path.status == .satisfied {
+            if path.usesInterfaceType(.wifi) {
+                status = .wifi
+            } else if path.usesInterfaceType(.cellular) {
+                status = .cellular
+            } else if path.usesInterfaceType(.wiredEthernet) {
+                status = .ethernet
+            } else {
+                status = .wifi // 默认
+            }
+        } else {
+            status = .unavailable
+        }
+        
+        isExpensive = path.isExpensive
+        isConstrained = path.isConstrained
+    }
+    
+    deinit {
+        monitor.cancel()
+    }
+}
+
+// MARK: - 设备状态监控
+
+/// 设备状态
+public struct DeviceStatus {
+    public let batteryLevel: Float
+    public let isCharging: Bool
+    public let thermalState: ProcessInfo.ThermalState
+    public let isLowPowerModeEnabled: Bool
+    public let availableStorage: Int64
+    public let memoryPressure: Float
+    
+    public var canPerformIntensiveSync: Bool {
+        return batteryLevel > 0.2 || isCharging &&
+               thermalState != .critical &&
+               !isLowPowerModeEnabled &&
+               availableStorage > 1024 * 1024 * 100 // 100MB
+    }
+    
+    public var recommendedConcurrency: Int {
+        if !canPerformIntensiveSync {
+            return 1
+        }
+        
+        switch thermalState {
+        case .nominal:
+            return isCharging ? 6 : 4
+        case .fair:
+            return isCharging ? 4 : 2
+        case .serious:
+            return 1
+        case .critical:
+            return 0
+        @unknown default:
+            return 2
+        }
+    }
+}
+
+/// 设备监控器
+public class DeviceMonitor: ObservableObject {
+    @Published public var status: DeviceStatus
+    
+    private var timer: Timer?
+    
+    public init() {
+        self.status = DeviceMonitor.getCurrentStatus()
+        startMonitoring()
+    }
+    
+    private func startMonitoring() {
+        timer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            self?.updateStatus()
+        }
+    }
+    
+    private func updateStatus() {
+        status = DeviceMonitor.getCurrentStatus()
+    }
+    
+    private static func getCurrentStatus() -> DeviceStatus {
+        #if canImport(UIKit)
+        let device = UIDevice.current
+        device.isBatteryMonitoringEnabled = true
+        
+        return DeviceStatus(
+            batteryLevel: device.batteryLevel,
+            isCharging: device.batteryState == .charging || device.batteryState == .full,
+            thermalState: ProcessInfo.processInfo.thermalState,
+            isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,
+            availableStorage: getAvailableStorage(),
+            memoryPressure: getMemoryPressure()
+        )
+        #else
+        // macOS 默认值
+        return DeviceStatus(
+            batteryLevel: 1.0, // 假设桌面设备总是有电
+            isCharging: true,
+            thermalState: ProcessInfo.processInfo.thermalState,
+            isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,
+            availableStorage: getAvailableStorage(),
+            memoryPressure: getMemoryPressure()
+        )
+        #endif
+    }
+    
+    private static func getAvailableStorage() -> Int64 {
+        do {
+            let attributes = try FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())
+            if let freeSize = attributes[.systemFreeSize] as? NSNumber {
+                return freeSize.int64Value
+            }
+        } catch {
+            // 忽略错误
+        }
+        return 0
+    }
+    
+    private static func getMemoryPressure() -> Float {
+        // 简化的内存压力计算
+        let info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size)/4
+        
+        let kerr: kern_return_t = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: 1) {
+                task_info(mach_task_self_,
+                         task_flavor_t(MACH_TASK_BASIC_INFO),
+                         $0,
+                         &count)
+            }
+        }
+        
+        if kerr == KERN_SUCCESS {
+            let usedMemory = Float(info.resident_size)
+            let totalMemory = Float(ProcessInfo.processInfo.physicalMemory)
+            return usedMemory / totalMemory
+        }
+        
+        return 0.5 // 默认值
+    }
+    
+    deinit {
+        timer?.invalidate()
+    }
+}
+
+// MARK: - 智能同步调度器
+
+/// 智能同步调度器
+public class IntelligentSyncScheduler: ObservableObject {
+    @Published public var activeTasks: [SyncTask] = []
+    @Published public var pendingTasks: [SyncTask] = []
+    @Published public var completedTasks: [SyncTask] = []
+    @Published public var failedTasks: [SyncTask] = []
+    
+    private var taskQueue: [SyncTask] = []
+    private let networkMonitor = NetworkMonitor()
+    private let deviceMonitor = DeviceMonitor()
+    private let maxConcurrentTasks = 6
+    private var schedulerTimer: Timer?
+    
+    private let deviceId: String
+    private let userId: String
+    
+    public init(deviceId: String, userId: String) {
+        self.deviceId = deviceId
+        self.userId = userId
+        startScheduler()
+    }
+    
+    // MARK: - 任务管理
+    
+    /// 添加同步任务
+    public func addTask(_ task: SyncTask) {
+        taskQueue.append(task)
+        pendingTasks.append(task)
+        scheduleNextTasks()
+    }
+    
+    /// 批量添加任务
+    public func addTasks(_ tasks: [SyncTask]) {
+        taskQueue.append(contentsOf: tasks)
+        pendingTasks.append(contentsOf: tasks)
+        scheduleNextTasks()
+    }
+    
+    /// 取消任务
+    public func cancelTask(id: String) {
+        taskQueue.removeAll { $0.id == id }
+        pendingTasks.removeAll { $0.id == id }
+        
+        if let index = activeTasks.firstIndex(where: { $0.id == id }) {
+            var task = activeTasks[index]
+            task.completedAt = Date()
+            task.lastError = "用户取消"
+            activeTasks.remove(at: index)
+            failedTasks.append(task)
+        }
+    }
+    
+    /// 重试失败的任务
+    public func retryFailedTasks() {
+        let retryableTasks = failedTasks.filter { $0.canRetry }
+        
+        for var task in retryableTasks {
+            task.retryCount += 1
+            task.scheduledAt = nil
+            task.startedAt = nil
+            task.completedAt = nil
+            task.lastError = nil
+            
+            addTask(task)
+        }
+        
+        failedTasks.removeAll { retryableTasks.contains($0) }
+    }
+    
+    // MARK: - 调度逻辑
+    
+    private func startScheduler() {
+        schedulerTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            self?.scheduleNextTasks()
+        }
+    }
+    
+    private func scheduleNextTasks() {
+        guard networkMonitor.status != .unavailable else { return }
+        
+        let maxConcurrent = calculateMaxConcurrentTasks()
+        let availableSlots = maxConcurrent - activeTasks.count
+        
+        guard availableSlots > 0 else { return }
+        
+        let readyTasks = getReadyTasks()
+        let tasksToStart = Array(readyTasks.prefix(availableSlots))
+        
+        for var task in tasksToStart {
+            task.startedAt = Date()
+            task.scheduledAt = Date()
+            
+            // 从待处理队列移除
+            taskQueue.removeAll { $0.id == task.id }
+            pendingTasks.removeAll { $0.id == task.id }
+            
+            // 添加到活跃队列
+            activeTasks.append(task)
+            
+            // 执行任务
+            executeTask(task)
+        }
+    }
+    
+    private func calculateMaxConcurrentTasks() -> Int {
+        let networkLimit = networkMonitor.status.maxConcurrentTasks
+        let deviceLimit = deviceMonitor.status.recommendedConcurrency
+        let baseLimit = maxConcurrentTasks
+        
+        return min(networkLimit, deviceLimit, baseLimit)
+    }
+    
+    private func getReadyTasks() -> [SyncTask] {
+        let now = Date()
+        
+        return taskQueue
+            .filter { task in
+                // 检查依赖是否完成
+                let dependenciesCompleted = task.dependencies.allSatisfy { depId in
+                    completedTasks.contains { $0.id == depId }
+                }
+                
+                // 检查重试时间
+                let canRetryNow = task.nextRetryTime == nil || task.nextRetryTime! <= now
+                
+                return dependenciesCompleted && canRetryNow
+            }
+            .sorted { task1, task2 in
+                // 按优先级和创建时间排序
+                if task1.priority != task2.priority {
+                    return task1.priority > task2.priority
+                }
+                return task1.createdAt < task2.createdAt
+            }
+    }
+    
+    private func executeTask(_ task: SyncTask) {
+        // 模拟任务执行
+        DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + task.operation.estimatedDuration) {
+            self.completeTask(task.id, success: Bool.random())
+        }
+    }
+    
+    private func completeTask(_ taskId: String, success: Bool, error: String? = nil) {
+        DispatchQueue.main.async {
+            guard let index = self.activeTasks.firstIndex(where: { $0.id == taskId }) else { return }
+            
+            var task = self.activeTasks[index]
+            task.completedAt = Date()
+            
+            self.activeTasks.remove(at: index)
+            
+            if success {
+                self.completedTasks.append(task)
+            } else {
+                task.lastError = error ?? "未知错误"
+                if task.canRetry {
+                    // 重新加入队列等待重试
+                    task.retryCount += 1
+                    self.taskQueue.append(task)
+                    self.pendingTasks.append(task)
+                } else {
+                    self.failedTasks.append(task)
+                }
+            }
+            
+            // 调度下一批任务
+            self.scheduleNextTasks()
+        }
+    }
+    
+    // MARK: - 自适应策略
+    
+    /// 根据网络状态调整同步策略
+    public func adaptToNetworkConditions() {
+        let networkStatus = networkMonitor.status
+        let isExpensive = networkMonitor.isExpensive
+        let isConstrained = networkMonitor.isConstrained
+        
+        // 在昂贵或受限网络下，只同步高优先级任务
+        if isExpensive || isConstrained {
+            taskQueue = taskQueue.filter { $0.priority >= .high }
+            pendingTasks = pendingTasks.filter { $0.priority >= .high }
+        }
+        
+        // 根据网络类型调整任务优先级
+        switch networkStatus {
+        case .cellular:
+            // 蜂窝网络下，降低大文件的优先级
+            adjustPriorityForLargeFiles(newPriority: .low)
+        case .wifi, .ethernet:
+            // WiFi或以太网下，可以正常同步
+            break
+        case .unavailable:
+            // 无网络时，暂停所有任务
+            pauseAllTasks()
+        }
+    }
+    
+    /// 根据设备状态调整同步策略
+    public func adaptToDeviceConditions() {
+        let deviceStatus = deviceMonitor.status
+        
+        if !deviceStatus.canPerformIntensiveSync {
+            // 设备状态不佳时，只执行关键任务
+            taskQueue = taskQueue.filter { $0.priority >= .critical }
+            pendingTasks = pendingTasks.filter { $0.priority >= .critical }
+        }
+        
+        if deviceStatus.thermalState == .critical {
+            // 设备过热时，暂停所有任务
+            pauseAllTasks()
+        }
+    }
+    
+    private func adjustPriorityForLargeFiles(newPriority: SyncPriority) {
+        let largeFileThreshold: Int64 = 10 * 1024 * 1024 // 10MB
+        
+        for i in 0..<taskQueue.count {
+            if taskQueue[i].estimatedSize > largeFileThreshold {
+                taskQueue[i] = SyncTask(
+                    filePath: taskQueue[i].filePath,
+                    operation: taskQueue[i].operation,
+                    priority: newPriority,
+                    dependencies: taskQueue[i].dependencies,
+                    estimatedSize: taskQueue[i].estimatedSize,
+                    deviceId: taskQueue[i].deviceId,
+                    userId: taskQueue[i].userId
+                )
+            }
+        }
+    }
+    
+    private func pauseAllTasks() {
+        // 将活跃任务重新加入队列
+        for var task in activeTasks {
+            task.startedAt = nil
+            task.scheduledAt = nil
+            taskQueue.append(task)
+            pendingTasks.append(task)
+        }
+        activeTasks.removeAll()
+    }
+    
+    // MARK: - 统计信息
+    
+    public var totalTasks: Int {
+        return activeTasks.count + pendingTasks.count + completedTasks.count + failedTasks.count
+    }
+    
+    public var successRate: Double {
+        let total = completedTasks.count + failedTasks.count
+        guard total > 0 else { return 0.0 }
+        return Double(completedTasks.count) / Double(total)
+    }
+    
+    public var averageTaskDuration: TimeInterval {
+        let completedWithDuration = completedTasks.compactMap { task -> TimeInterval? in
+            guard let start = task.startedAt, let end = task.completedAt else { return nil }
+            return end.timeIntervalSince(start)
+        }
+        
+        guard !completedWithDuration.isEmpty else { return 0.0 }
+        return completedWithDuration.reduce(0, +) / Double(completedWithDuration.count)
+    }
+    
+    deinit {
+        schedulerTimer?.invalidate()
+    }
+}
+
+// MARK: - 扩展
+
+extension SyncTask: Equatable {
+    public static func == (lhs: SyncTask, rhs: SyncTask) -> Bool {
+        return lhs.id == rhs.id
+    }
+}
+
+// 添加processSyncQueue方法供AdvancedSyncManager调用
+extension IntelligentSyncScheduler {
+    public func processSyncQueue() async {
+        scheduleNextTasks()
+    }
+}

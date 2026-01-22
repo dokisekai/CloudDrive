@@ -1,0 +1,771 @@
+//
+//  AdvancedSyncManager.swift
+//  CloudDriveCore
+//
+//  高级同步管理器 - 整合所有先进的同步机制
+//
+
+import Foundation
+import Network
+import Combine
+import CryptoKit
+
+#if canImport(UIKit) && !targetEnvironment(macCatalyst)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
+
+#if canImport(IOKit)
+import IOKit
+#endif
+
+/// 高级同步管理器
+public class AdvancedSyncManager: ObservableObject {
+    public static let shared = AdvancedSyncManager()
+    
+    // MARK: - 核心组件
+    
+    private let operationalTransform: AdvancedOperationalTransform
+    private let crdtManager: CRDTManager
+    private let conflictDetector: ConflictDetector
+    private let conflictResolver: AutoConflictResolver
+    private let syncScheduler: IntelligentSyncScheduler
+    private let versionControl: DistributedVersionControl
+    
+    // MARK: - 传统组件
+    
+    private let fileManager = FileManager.default
+    private let metadataQueue = DispatchQueue(label: "com.clouddrive.sync.metadata")
+    private let syncQueue = DispatchQueue(label: "com.clouddrive.sync.operations")
+    
+    // MARK: - 状态管理
+    
+    @Published public var syncStatus: AdvancedSyncStatus = .idle
+    @Published public var activeConflicts: [ConflictInfo] = []
+    @Published public var syncProgress: SyncProgress = SyncProgress()
+    
+    private var fileMetadataStore: [String: AdvancedFileMetadata] = [:]
+    private var operationHistory: [CompositeOperation] = []
+    private var deviceId: String
+    private var userId: String
+    private var author: Author
+    
+    // MARK: - 存储和网络
+    
+    private var storageClient: StorageClient?
+    private let networkMonitor = NetworkMonitor()
+    private let deviceMonitor = DeviceMonitor()
+    
+    // MARK: - 初始化
+    
+    private init() {
+        self.deviceId = Self.generateDeviceId()
+        self.userId = "current_user" // 应该从用户管理系统获取
+        self.author = Author(id: userId, name: "Current User", email: "user@example.com")
+        
+        // 初始化核心组件
+        self.operationalTransform = AdvancedOperationalTransform(deviceId: deviceId)
+        self.crdtManager = CRDTManager(nodeId: deviceId)
+        self.conflictDetector = ConflictDetector(deviceId: deviceId, userId: userId)
+        self.conflictResolver = AutoConflictResolver(deviceId: deviceId, userId: userId)
+        self.syncScheduler = IntelligentSyncScheduler(deviceId: deviceId, userId: userId)
+        self.versionControl = DistributedVersionControl(deviceId: deviceId, userId: userId, author: author)
+        
+        // 加载持久化数据
+        loadMetadata()
+        loadOperationHistory()
+        
+        // 启动监控
+        startMonitoring()
+        
+        Logger.shared.info(.sync, "高级同步管理器已初始化")
+    }
+    
+    /// 生成设备标识符（跨平台兼容）
+    private static func generateDeviceId() -> String {
+        #if canImport(UIKit) && !targetEnvironment(macCatalyst)
+        return UIDevice.current.identifierForVendor?.uuidString ?? UUID().uuidString
+        #else
+        // macOS 使用系统序列号或生成唯一标识符
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+        var deviceId: String = UUID().uuidString
+        
+        if service > 0 {
+            if let serialNumberAsCFString = IORegistryEntryCreateCFProperty(service, kIOPlatformSerialNumberKey as CFString, kCFAllocatorDefault, 0)?.takeUnretainedValue() {
+                if let serial = serialNumberAsCFString as? String {
+                    deviceId = "mac_\(serial)"
+                }
+            }
+            IOObjectRelease(service)
+        }
+        
+        return deviceId
+        #endif
+    }
+    
+    // MARK: - 配置
+    
+    /// 配置存储客户端
+    public func configure(storageClient: StorageClient) {
+        self.storageClient = storageClient
+        Logger.shared.info(.sync, "存储客户端已配置")
+    }
+    
+    // MARK: - 监控
+    
+    private func startMonitoring() {
+        // 监听网络状态变化
+        networkMonitor.$status
+            .sink { [weak self] status in
+                self?.handleNetworkStatusChange(status)
+            }
+            .store(in: &cancellables)
+        
+        // 监听设备状态变化
+        deviceMonitor.$status
+            .sink { [weak self] status in
+                self?.handleDeviceStatusChange(status)
+            }
+            .store(in: &cancellables)
+        
+        // 监听同步调度器状态
+        syncScheduler.$activeTasks
+            .sink { [weak self] tasks in
+                self?.updateSyncProgress(activeTasks: tasks)
+            }
+            .store(in: &cancellables)
+    }
+    
+    private var cancellables = Set<AnyCancellable>()
+    
+    private func handleNetworkStatusChange(_ status: NetworkStatus) {
+        Logger.shared.info(.sync, "网络状态变更: \(status)")
+        
+        switch status {
+        case .unavailable:
+            syncStatus = .offline
+        case .wifi, .ethernet:
+            syncStatus = .online
+            syncScheduler.adaptToNetworkConditions()
+            resumeSync()
+        case .cellular:
+            syncStatus = .limitedConnectivity
+            syncScheduler.adaptToNetworkConditions()
+        }
+    }
+    
+    private func handleDeviceStatusChange(_ status: DeviceStatus) {
+        Logger.shared.info(.sync, "设备状态变更: 电池 \(status.batteryLevel), 充电 \(status.isCharging)")
+        syncScheduler.adaptToDeviceConditions()
+    }
+    
+    private func updateSyncProgress(activeTasks: [SyncTask]) {
+        DispatchQueue.main.async {
+            self.syncProgress.activeTasks = activeTasks.count
+            self.syncProgress.totalTasks = self.syncScheduler.totalTasks
+            
+            if activeTasks.isEmpty && self.syncProgress.totalTasks > 0 {
+                self.syncStatus = .completed
+            } else if !activeTasks.isEmpty {
+                self.syncStatus = .syncing
+            }
+        }
+    }
+    
+    // MARK: - 文件操作
+    
+    /// 创建文件
+    public func createFile(
+        name: String,
+        content: Data,
+        parentPath: String,
+        mimeType: String? = nil
+    ) async throws -> String {
+        let fileId = UUID().uuidString
+        let localPath = "\(parentPath)/\(name)"
+        _ = localPath // 标记为已使用
+        
+        // 创建CRDT文档
+        let metadata = CRDTDocument.DocumentMetadata(
+            title: name,
+            author: author.name,
+            createdAt: Date(),
+            modifiedAt: Date(),
+            mimeType: mimeType ?? "application/octet-stream",
+            size: Int64(content.count)
+        )
+        
+        crdtManager.createDocument(id: fileId, metadata: metadata)
+        
+        // 创建版本控制对象
+        let blobId = versionControl.createBlob(content: content, mimeType: mimeType)
+        let treeEntry = TreeEntry(
+            mode: .regularFile,
+            name: name,
+            id: blobId,
+            type: .blob
+        )
+        let treeId = versionControl.createTree(entries: [treeEntry])
+        let commitId = versionControl.createCommit(
+            treeId: treeId,
+            message: "Create file: \(name)"
+        )
+        
+        // 创建高级元数据
+        let advancedMetadata = AdvancedFileMetadata(
+            fileId: fileId,
+            name: name,
+            parentPath: parentPath,
+            isDirectory: false,
+            syncStatus: .localOnly,
+            localPath: localPath,
+            size: Int64(content.count),
+            localModifiedAt: Date(),
+            crdtDocumentId: fileId,
+            versionControlCommitId: commitId,
+            conflictResolutionStrategy: .merge
+        )
+        
+        updateMetadata(advancedMetadata)
+        
+        // 写入本地文件
+        let localURL = URL(fileURLWithPath: localPath)
+        try content.write(to: localURL)
+        
+        // 添加到同步队列
+        let syncTask = SyncTask(
+            filePath: localPath,
+            operation: .upload,
+            priority: .normal,
+            estimatedSize: Int64(content.count),
+            deviceId: deviceId,
+            userId: userId
+        )
+        
+        syncScheduler.addTask(syncTask)
+        
+        Logger.shared.info(.sync, "文件创建成功: \(name)")
+        return fileId
+    }
+    
+    /// 修改文件
+    public func modifyFile(
+        fileId: String,
+        newContent: Data,
+        operations: [AtomicOperation] = []
+    ) async throws {
+        guard let metadata = getMetadata(fileId: fileId) else {
+            throw AdvancedSyncError.fileNotFound(fileId)
+        }
+        
+        // 应用操作转换
+        if !operations.isEmpty {
+            let compositeOp = CompositeOperation(operations: operations)
+            operationHistory.append(compositeOp)
+            
+            // 如果有其他并发操作，进行转换
+            let concurrentOps = getConcurrentOperations(for: fileId, since: metadata.lastSyncAt)
+            for concurrentOp in concurrentOps {
+                let transformed = operationalTransform.transform(compositeOp, against: concurrentOp)
+                // 应用转换后的操作
+                applyTransformedOperation(transformed, to: fileId)
+            }
+        }
+        
+        // 更新CRDT文档
+        if crdtManager.getDocument(id: fileId) != nil {
+            // 这里应该根据操作更新CRDT文档
+            // 简化实现：直接更新内容
+        }
+        
+        // 创建新的版本控制提交
+        let blobId = versionControl.createBlob(content: newContent)
+        let treeEntry = TreeEntry(
+            mode: .regularFile,
+            name: metadata.name,
+            id: blobId,
+            type: .blob
+        )
+        let treeId = versionControl.createTree(entries: [treeEntry])
+        let commitId = versionControl.createCommit(
+            parentIds: [metadata.versionControlCommitId],
+            treeId: treeId,
+            message: "Modify file: \(metadata.name)"
+        )
+        
+        // 更新元数据
+        var updatedMetadata = metadata
+        updatedMetadata.syncStatus = .pendingUpload
+        updatedMetadata.localModifiedAt = Date()
+        updatedMetadata.versionControlCommitId = commitId
+        updatedMetadata.size = Int64(newContent.count)
+        
+        updateMetadata(updatedMetadata)
+        
+        // 写入本地文件
+        if let localPath = metadata.localPath {
+            let localURL = URL(fileURLWithPath: localPath)
+            try newContent.write(to: localURL)
+        }
+        
+        // 添加到同步队列
+        let syncTask = SyncTask(
+            filePath: metadata.localPath ?? "",
+            operation: .upload,
+            priority: .high,
+            estimatedSize: Int64(newContent.count),
+            deviceId: deviceId,
+            userId: userId
+        )
+        
+        syncScheduler.addTask(syncTask)
+        
+        Logger.shared.info(.sync, "文件修改成功: \(metadata.name)")
+    }
+    
+    /// 删除文件
+    public func deleteFile(fileId: String) async throws {
+        guard let metadata = getMetadata(fileId: fileId) else {
+            throw AdvancedSyncError.fileNotFound(fileId)
+        }
+        
+        // 创建删除操作
+        let deleteOp = AtomicOperation.delete(
+            position: 0,
+            length: Int(metadata.size),
+            timestamp: Date(),
+            deviceId: deviceId,
+            operationId: UUID().uuidString
+        )
+        
+        let compositeOp = CompositeOperation(operations: [deleteOp])
+        operationHistory.append(compositeOp)
+        
+        // 更新元数据
+        var updatedMetadata = metadata
+        updatedMetadata.syncStatus = .pendingDelete
+        updatedMetadata.localModifiedAt = Date()
+        
+        updateMetadata(updatedMetadata)
+        
+        // 删除本地文件
+        if let localPath = metadata.localPath {
+            try? fileManager.removeItem(atPath: localPath)
+        }
+        
+        // 添加到同步队列
+        let syncTask = SyncTask(
+            filePath: metadata.remotePath ?? "",
+            operation: .delete,
+            priority: .high,
+            deviceId: deviceId,
+            userId: userId
+        )
+        
+        syncScheduler.addTask(syncTask)
+        
+        Logger.shared.info(.sync, "文件删除成功: \(metadata.name)")
+    }
+    
+    // MARK: - 冲突处理
+    
+    /// 检测冲突
+    public func detectConflicts(for fileId: String) async -> [ConflictInfo] {
+        guard let metadata = getMetadata(fileId: fileId) else { return [] }
+        
+        // 获取本地和远程版本
+        let localVersion = await getLocalVersion(for: metadata)
+        let remoteVersion = await getRemoteVersion(for: metadata)
+        
+        guard let local = localVersion, let remote = remoteVersion else { return [] }
+        
+        let conflicts = conflictDetector.detectConflicts(
+            localVersion: local,
+            remoteVersion: remote,
+            filePath: metadata.localPath ?? metadata.remotePath ?? ""
+        )
+        
+        // 更新活跃冲突列表
+        DispatchQueue.main.async {
+            self.activeConflicts.append(contentsOf: conflicts)
+        }
+        
+        return conflicts
+    }
+    
+    /// 自动解决冲突
+    public func resolveConflict(
+        _ conflict: ConflictInfo,
+        strategy: ResolutionStrategy? = nil
+    ) async -> ConflictResolutionResult {
+        let resolveStrategy = strategy ?? selectBestStrategy(for: conflict)
+        let result = conflictResolver.resolveConflict(conflict, strategy: resolveStrategy)
+        
+        if result.success {
+            // 移除已解决的冲突
+            DispatchQueue.main.async {
+                self.activeConflicts.removeAll { $0.id == conflict.id }
+            }
+            
+            // 更新文件内容
+            if let resolvedVersion = result.resolvedVersion {
+                await updateFileWithResolvedVersion(conflict.filePath, version: resolvedVersion)
+            }
+        }
+        
+        return result
+    }
+    
+    private func selectBestStrategy(for conflict: ConflictInfo) -> ResolutionStrategy {
+        switch conflict.type {
+        case .contentConflict:
+            return .merge
+        case .metadataConflict:
+            return .useNewest
+        case .versionConflict:
+            return .threeWayMerge
+        case .timestampConflict:
+            return .useNewest
+        default:
+            return .manualResolve
+        }
+    }
+    
+    // MARK: - 同步操作
+    
+    /// 开始同步
+    public func startSync() {
+        guard !isSyncing() else { return }
+        
+        syncStatus = .syncing
+        
+        // 检测所有文件的冲突
+        Task {
+            await detectAllConflicts()
+            
+            // 自动解决可以自动解决的冲突
+            await resolveAutoResolvableConflicts()
+            
+            // 开始同步队列处理
+            resumeSync()
+        }
+    }
+    
+    /// 暂停同步
+    public func pauseSync() {
+        syncStatus = .paused
+        // 暂停同步调度器
+    }
+    
+    /// 恢复同步
+    public func resumeSync() {
+        guard networkMonitor.status != .unavailable else { return }
+        
+        syncStatus = .syncing
+        // 恢复同步调度
+        Task {
+            await syncScheduler.processSyncQueue()
+        }
+    }
+    
+    /// 停止同步
+    public func stopSync() {
+        syncStatus = .idle
+        // 停止所有同步任务
+    }
+    
+    private func detectAllConflicts() async {
+        let allFiles = getAllMetadata()
+        
+        for metadata in allFiles {
+            let conflicts = await detectConflicts(for: metadata.fileId)
+            if !conflicts.isEmpty {
+                Logger.shared.warning(.sync, "检测到冲突: \(metadata.name) - \(conflicts.count) 个")
+            }
+        }
+    }
+    
+    private func resolveAutoResolvableConflicts() async {
+        let autoResolvableConflicts = activeConflicts.filter { conflict in
+            let strategies = conflict.resolutionStrategies
+            return strategies.contains(.merge) || strategies.contains(.useNewest)
+        }
+        
+        for conflict in autoResolvableConflicts {
+            let result = await resolveConflict(conflict)
+            if result.success {
+                Logger.shared.info(.sync, "自动解决冲突: \(conflict.filePath)")
+            }
+        }
+    }
+    
+    // MARK: - 元数据管理
+    
+    private func updateMetadata(_ metadata: AdvancedFileMetadata) {
+        metadataQueue.sync {
+            fileMetadataStore[metadata.fileId] = metadata
+        }
+        saveMetadata()
+    }
+    
+    private func getMetadata(fileId: String) -> AdvancedFileMetadata? {
+        return metadataQueue.sync {
+            return fileMetadataStore[fileId]
+        }
+    }
+    
+    private func getAllMetadata() -> [AdvancedFileMetadata] {
+        return metadataQueue.sync {
+            return Array(fileMetadataStore.values)
+        }
+    }
+    
+    private func loadMetadata() {
+        // 从持久化存储加载元数据
+        // 简化实现
+    }
+    
+    private func saveMetadata() {
+        // 保存元数据到持久化存储
+        // 简化实现
+    }
+    
+    private func loadOperationHistory() {
+        // 从持久化存储加载操作历史
+        // 简化实现
+    }
+    
+    // MARK: - 辅助方法
+    
+    private func getConcurrentOperations(for fileId: String, since: Date?) -> [CompositeOperation] {
+        guard let since = since else { return [] }
+        
+        return operationHistory.filter { op in
+            op.timestamp > since && op.operations.contains { atomicOp in
+                // 检查操作是否影响指定文件
+                return true // 简化实现
+            }
+        }
+    }
+    
+    private func applyTransformedOperation(_ operation: CompositeOperation, to fileId: String) {
+        // 应用转换后的操作到文件
+        // 简化实现
+    }
+    
+    private func getLocalVersion(for metadata: AdvancedFileMetadata) async -> FileVersion? {
+        guard let localPath = metadata.localPath,
+              fileManager.fileExists(atPath: localPath) else { return nil }
+        
+        let content = try? Data(contentsOf: URL(fileURLWithPath: localPath))
+        let hash = content?.sha256 ?? ""
+        
+        return FileVersion(
+            hash: hash,
+            timestamp: metadata.localModifiedAt ?? Date(),
+            size: metadata.size,
+            deviceId: deviceId,
+            userId: userId,
+            content: content
+        )
+    }
+    
+    private func getRemoteVersion(for metadata: AdvancedFileMetadata) async -> FileVersion? {
+        guard let remotePath = metadata.remotePath,
+              let storageClient = storageClient else { return nil }
+        
+        do {
+            let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString)
+            try await storageClient.downloadFile(path: remotePath, to: tempURL) { _ in }
+            
+            let content = try Data(contentsOf: tempURL)
+            let hash = content.sha256
+            
+            try? fileManager.removeItem(at: tempURL)
+            
+            return FileVersion(
+                hash: hash,
+                timestamp: metadata.remoteModifiedAt ?? Date(),
+                size: Int64(content.count),
+                deviceId: "remote",
+                userId: "remote",
+                content: content
+            )
+        } catch {
+            Logger.shared.error(.sync, "获取远程版本失败: \(error.localizedDescription)")
+            return nil
+        }
+    }
+    
+    private func updateFileWithResolvedVersion(_ filePath: String, version: FileVersion) async {
+        guard let content = version.content else { return }
+        
+        do {
+            let url = URL(fileURLWithPath: filePath)
+            try content.write(to: url)
+            Logger.shared.info(.sync, "文件已更新为解决版本: \(filePath)")
+        } catch {
+            Logger.shared.error(.sync, "更新解决版本失败: \(error.localizedDescription)")
+        }
+    }
+}
+
+// MARK: - 高级同步状态
+
+/// 高级同步状态
+public enum AdvancedSyncStatus {
+    case idle                   // 空闲
+    case syncing               // 同步中
+    case paused                // 已暂停
+    case completed             // 已完成
+    case offline               // 离线
+    case online                // 在线
+    case limitedConnectivity   // 受限连接
+    case error(String)         // 错误
+    
+    public var description: String {
+        switch self {
+        case .idle: return "空闲"
+        case .syncing: return "同步中"
+        case .paused: return "已暂停"
+        case .completed: return "已完成"
+        case .offline: return "离线"
+        case .online: return "在线"
+        case .limitedConnectivity: return "受限连接"
+        case .error(let message): return "错误: \(message)"
+        }
+    }
+}
+
+// MARK: - 同步进度
+
+/// 同步进度
+public struct SyncProgress {
+    public var activeTasks: Int = 0
+    public var totalTasks: Int = 0
+    public var completedTasks: Int = 0
+    public var failedTasks: Int = 0
+    
+    public var progress: Double {
+        guard totalTasks > 0 else { return 0.0 }
+        return Double(completedTasks) / Double(totalTasks)
+    }
+    
+    public var isComplete: Bool {
+        return activeTasks == 0 && totalTasks > 0
+    }
+}
+
+// MARK: - 高级文件元数据
+
+/// 高级文件元数据
+public struct AdvancedFileMetadata: Codable {
+    public let fileId: String
+    public let name: String
+    public let parentPath: String
+    public let isDirectory: Bool
+    
+    public var syncStatus: SyncStatus
+    public var localPath: String?
+    public var remotePath: String?
+    public var size: Int64
+    public var localModifiedAt: Date?
+    public var remoteModifiedAt: Date?
+    public var lastSyncAt: Date?
+    public var etag: String?
+    
+    // 高级功能
+    public let crdtDocumentId: String?
+    public var versionControlCommitId: String
+    public var conflictResolutionStrategy: ResolutionStrategy
+    public var operationHistory: [String] // 操作ID列表
+    
+    public init(
+        fileId: String,
+        name: String,
+        parentPath: String,
+        isDirectory: Bool,
+        syncStatus: SyncStatus,
+        localPath: String? = nil,
+        remotePath: String? = nil,
+        size: Int64 = 0,
+        localModifiedAt: Date? = nil,
+        remoteModifiedAt: Date? = nil,
+        etag: String? = nil,
+        crdtDocumentId: String? = nil,
+        versionControlCommitId: String = "",
+        conflictResolutionStrategy: ResolutionStrategy = .merge
+    ) {
+        self.fileId = fileId
+        self.name = name
+        self.parentPath = parentPath
+        self.isDirectory = isDirectory
+        self.syncStatus = syncStatus
+        self.localPath = localPath
+        self.remotePath = remotePath
+        self.size = size
+        self.localModifiedAt = localModifiedAt
+        self.remoteModifiedAt = remoteModifiedAt
+        self.etag = etag
+        self.crdtDocumentId = crdtDocumentId
+        self.versionControlCommitId = versionControlCommitId
+        self.conflictResolutionStrategy = conflictResolutionStrategy
+        self.operationHistory = []
+    }
+}
+
+// MARK: - 高级同步错误
+
+/// 高级同步错误
+public enum AdvancedSyncError: Error, LocalizedError {
+    case fileNotFound(String)
+    case conflictNotResolvable(String)
+    case operationTransformFailed(String)
+    case crdtMergeFailed(String)
+    case versionControlError(String)
+    case networkError(String)
+    case storageError(String)
+    
+    public var errorDescription: String? {
+        switch self {
+        case .fileNotFound(let fileId):
+            return "文件未找到: \(fileId)"
+        case .conflictNotResolvable(let reason):
+            return "冲突无法解决: \(reason)"
+        case .operationTransformFailed(let reason):
+            return "操作转换失败: \(reason)"
+        case .crdtMergeFailed(let reason):
+            return "CRDT合并失败: \(reason)"
+        case .versionControlError(let reason):
+            return "版本控制错误: \(reason)"
+        case .networkError(let reason):
+            return "网络错误: \(reason)"
+        case .storageError(let reason):
+            return "存储错误: \(reason)"
+        }
+    }
+}
+
+// MARK: - 扩展
+
+extension Data {
+    var sha256: String {
+        let digest = SHA256.hash(data: self)
+        return digest.compactMap { String(format: "%02x", $0) }.joined()
+    }
+}
+
+
+// MARK: - 辅助方法扩展
+
+extension AdvancedSyncManager {
+    private func isSyncing() -> Bool {
+        switch syncStatus {
+        case .syncing:
+            return true
+        default:
+            return false
+        }
+    }
+}
