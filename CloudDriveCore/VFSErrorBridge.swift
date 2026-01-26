@@ -2,6 +2,9 @@
 //  VFSErrorBridge.swift
 //  CloudDriveCore
 //
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
+//
 //  VFS 错误桥接 - 将 VFSError 转换为 Foundation 错误
 //
 

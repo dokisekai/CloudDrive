@@ -2,6 +2,9 @@
 //  VirtualFileSystem.swift
 //  CloudDriveCore
 //
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
+//
 //  虚拟文件系统 - 类似 Cryptomator 的架构
 //  在本地维护文件结构映射，WebDAV 只存储加密数据
 //

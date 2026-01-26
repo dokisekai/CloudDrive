@@ -2,6 +2,9 @@
 //  SyncManager.swift
 //  CloudDriveCore
 //
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
+//
 //  文件同步管理器 - 处理本地和云端的同步
 //
 

@@ -5,6 +5,14 @@
 //  创建保险库视图
 //
 
+//
+//  CreateVaultView.swift
+//  CloudDrive
+//
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
+//
+
 import SwiftUI
 import CloudDriveCore
 

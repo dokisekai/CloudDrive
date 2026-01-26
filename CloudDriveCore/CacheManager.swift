@@ -2,6 +2,9 @@
 //  CacheManager.swift
 //  CloudDriveCore
 //
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
+//
 //  本地缓存管理器 - iCloud 风格
 //
 

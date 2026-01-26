@@ -2,6 +2,9 @@
 //  KeychainService.swift
 //  CloudDriveCore
 //
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
+//
 //  密钥链服务，用于在主应用和FileProviderExtension之间共享主密钥
 //
 

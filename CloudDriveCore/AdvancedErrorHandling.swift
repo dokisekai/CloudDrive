@@ -2,6 +2,9 @@
 //  AdvancedErrorHandling.swift
 //  CloudDriveCore
 //
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
+//
 //  高级错误处理和日志记录系统
 //
 

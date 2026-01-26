@@ -5,6 +5,14 @@
 //  主界面 - 仅保留保险库管理功能
 //
 
+//
+//  ContentView.swift
+//  CloudDrive
+//
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
+//
+
 import SwiftUI
 import CloudDriveCore
 

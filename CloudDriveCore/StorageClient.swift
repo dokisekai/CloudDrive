@@ -2,6 +2,9 @@
 //  StorageClient.swift
 //  CloudDriveCore
 //
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
+//
 //  存储客户端协议 - 统一本地和WebDAV存储接口
 //
 

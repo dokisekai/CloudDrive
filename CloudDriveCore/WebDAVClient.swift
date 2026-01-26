@@ -2,6 +2,9 @@
 //  WebDAVClient.swift
 //  CloudDriveCore
 //
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
+//
 //  WebDAV 客户端实现
 //
 

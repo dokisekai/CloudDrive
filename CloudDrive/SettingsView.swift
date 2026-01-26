@@ -1,6 +1,9 @@
 //
 //  SettingsView.swift
-//  CloudDriveApp
+//  CloudDrive
+//
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
 //
 //  设置视图
 //

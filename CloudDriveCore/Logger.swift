@@ -2,6 +2,9 @@
 //  Logger.swift
 //  CloudDriveCore
 //
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
+//
 //  统一日志管理器 - 支持多个独立日志文件和系统日志
 //
 

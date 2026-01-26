@@ -2,6 +2,9 @@
 //  FileProviderSync.swift
 //  CloudDriveCore
 //
+//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
+//  https://github.com/dokisekai/CloudDrive
+//
 //  File Provider 和主应用之间的同步机制
 //
 
