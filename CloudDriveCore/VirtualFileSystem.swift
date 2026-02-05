@@ -72,6 +72,9 @@ public class VirtualFileSystem {
     // 同步管理器
     private let syncManager = SyncManager.shared
     
+    // 操作管理器
+    private let operationManager = FileOperationManager.shared
+    
     // 当前保险库 ID，用于密钥链访问
     private var currentVaultId: String?
     
@@ -99,6 +102,11 @@ public class VirtualFileSystem {
         }
         
         print("✅ VFS: WebDAV 存储配置完成")
+    }
+    
+    /// 获取当前配置的 storageClient
+    public func getStorageClient() -> StorageClient? {
+        return storageClient
     }
     
     // MARK: - Initialization
@@ -429,6 +437,54 @@ public class VirtualFileSystem {
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     }
     
+    /// 检查当前保险库是否已挂载
+    public func isVaultMounted(vaultId: String) -> Bool {
+        return currentVaultId == vaultId
+    }
+    
+    /// 重新挂载直接映射保险库（不需要配置文件）
+    public func remountDirectMappingVault(vaultId: String, storagePath: String) async throws {
+        print("🔓 VFS: 重新挂载直接映射保险库")
+        print("   保险库ID: \(vaultId)")
+        print("   存储路径: \(storagePath)")
+        
+        // 检查 WebDAV 配置
+        guard let storageClient = storageClient else {
+            throw VFSError.storageNotConfigured
+        }
+        print("✅ VFS: storageClient 已配置")
+        
+        // 检查是否已经是同一个保险库
+        if let currentVaultId = currentVaultId, currentVaultId == vaultId {
+            print("✅ VFS: 已经挂载了同一个保险库，跳过")
+            return
+        }
+        
+        // 如果挂载了其他保险库，先锁定
+        if currentVaultId != nil {
+            print("⚠️ VFS: 检测到已挂载其他保险库，先锁定")
+            lock()
+        }
+        
+        // 加载数据库
+        print("💾 VFS: 加载数据库...")
+        do {
+            try database.load(vaultId: vaultId, basePath: storagePath)
+            print("✅ VFS: 数据库加载成功")
+        } catch {
+            print("❌ VFS: 数据库加载失败: \(error)")
+            
+            // 如果数据库加载失败，尝试重新初始化（可能数据库文件被删除）
+            print("🔄 VFS: 尝试重新初始化数据库...")
+            try await initializeDirectMappingVault(vaultId: vaultId, storagePath: storagePath)
+            print("✅ VFS: 数据库重新初始化成功")
+        }
+        
+        // 保存保险库 ID
+        self.currentVaultId = vaultId
+        print("✅ VFS: 直接映射保险库重新挂载成功")
+    }
+    
     /// 挂载保险库（无加密模式）
     public func mountVaultWithoutEncryption(storagePath: String, vaultId: String) async throws {
         print("🔓 VFS: 挂载保险库（无加密模式）")
@@ -437,6 +493,18 @@ public class VirtualFileSystem {
         
         guard let storageClient = storageClient else {
             throw VFSError.storageNotConfigured
+        }
+        
+        // 检查是否已经是同一个保险库
+        if let currentVaultId = currentVaultId, currentVaultId == vaultId {
+            print("✅ VFS: 已经挂载了同一个保险库，跳过")
+            return
+        }
+        
+        // 如果挂载了其他保险库，先锁定
+        if currentVaultId != nil {
+            print("⚠️ VFS: 检测到已挂载其他保险库，先锁定")
+            lock()
         }
         
         // 1. 读取配置文件
@@ -806,12 +874,20 @@ public class VirtualFileSystem {
         
         print("📄 VFS: 远程目录路径: \(remotePath)")
         
+        let operationId = operationManager.addOperation(
+            type: .create,
+            fileName: name,
+            filePath: remotePath
+        )
+        
         // 2. 在 WebDAV 上创建目录
         print("⬆️ VFS: 在远程存储创建目录...")
         do {
+            operationManager.updateOperation(id: operationId, status: .inProgress)
             try await storageClient.createDirectory(path: remotePath)
             print("✅ VFS: 远程目录创建成功")
         } catch {
+            operationManager.updateOperation(id: operationId, status: .failed, errorMessage: error.localizedDescription)
             print("❌ VFS: 远程目录创建失败: \(error)")
             throw VFSError.directoryCreationFailed(error.localizedDescription)
         }
@@ -849,6 +925,8 @@ public class VirtualFileSystem {
         )
         syncManager.updateMetadata(metadata)
         print("✅ VFS: 同步状态已更新")
+        
+        operationManager.updateOperation(id: operationId, status: .completed)
         
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("✅ VFS.createDirectory: 目录创建完成")
@@ -909,16 +987,24 @@ public class VirtualFileSystem {
         
         print("📄 VFS: 远程文件路径: \(remoteFilePath)")
         
+        let operationId = operationManager.addOperation(
+            type: .upload,
+            fileName: name,
+            filePath: remoteFilePath
+        )
+        
         // 3. 上传文件到 WebDAV
         print("⬆️ VFS: 上传文件到远程存储...")
         do {
-            try await storageClient.uploadFile(localURL: localURL, to: remoteFilePath) { progress in
+            try await storageClient.uploadFile(localURL: localURL, to: remoteFilePath) { [self] progress in
                 if Int(progress * 100) % 20 == 0 {  // 每20%打印一次
                     print("📊 VFS: 上传进度: \(Int(progress * 100))%")
                 }
+                self.operationManager.updateProgress(id: operationId, progress: progress)
             }
             print("✅ VFS: 文件上传成功")
         } catch {
+            operationManager.updateOperation(id: operationId, status: .failed, errorMessage: error.localizedDescription)
             print("❌ VFS: 文件上传失败: \(error)")
             throw VFSError.fileOperationFailed("上传失败: \(error.localizedDescription)")
         }
@@ -959,6 +1045,8 @@ public class VirtualFileSystem {
         )
         syncManager.updateMetadata(metadata)
         print("✅ VFS: 同步状态已更新")
+        
+        operationManager.updateOperation(id: operationId, status: .completed)
         
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("✅ VFS.uploadFile: 文件上传完成")
@@ -1037,7 +1125,7 @@ public class VirtualFileSystem {
     /// 删除文件或目录（支持直接映射模式）
     public func delete(itemId: String) async throws {
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print("🗑️ VFS.delete: 开始删除")
+        print("🗑️ VFS.delete: 开始删除云端文件")
         print("   项目ID: \(itemId)")
         print("   当前时间: \(Date())")
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -1053,12 +1141,21 @@ public class VirtualFileSystem {
                 }
                 print("✅ VFS: storageClient 已配置")
                 
-                // 1. 尝试从数据库获取项目信息
+                // 1. 尝试从数据库获取文件信息
                 print("🔍 VFS: 尝试从数据库获取文件...")
                 if let file = try? self.database.getFile(id: itemId) {
                     print("✅ VFS: 找到文件（数据库模式）: \(file.name)")
                     print("   远程路径: \(file.remotePath)")
                     print("📤 VFS: 调用 storageClient.delete(path: \(file.remotePath))")
+                    
+                    let fileName = URL(fileURLWithPath: itemId).lastPathComponent
+                    let operationId = operationManager.addOperation(
+                        type: .delete,
+                        fileName: fileName,
+                        filePath: file.remotePath
+                    )
+                    
+                    operationManager.updateOperation(id: operationId, status: .inProgress)
                     
                     // 删除远程文件
                     try await storageClient.delete(path: file.remotePath)
@@ -1073,6 +1170,8 @@ public class VirtualFileSystem {
                     self.syncManager.removeMetadata(fileId: itemId)
                     print("✅ VFS: 同步元数据已删除")
                     
+                    operationManager.updateOperation(id: operationId, status: .completed)
+                    
                     print("✅ VFS: 文件删除成功（数据库模式）")
                     return
                 }
@@ -1081,11 +1180,15 @@ public class VirtualFileSystem {
                 if let directory = try? self.database.getDirectory(id: itemId) {
                     print("✅ VFS: 找到目录（数据库模式）: \(directory.name)")
                     print("   远程路径: \(directory.remotePath)")
-                    print("📤 VFS: 调用递归删除目录")
+                    print("📤 VFS: 直接删除远程目录")
                     
-                    // 递归删除目录
-                    try await self.deleteDirectoryRecursive(directory: directory, storageClient: storageClient)
-                    print("✅ VFS: 递归删除目录成功")
+                    // 直接删除远程目录（不递归）
+                    try await storageClient.delete(path: directory.remotePath)
+                    print("✅ VFS: 远程目录删除成功")
+                    
+                    // 删除数据库记录
+                    try self.database.deleteDirectory(id: itemId)
+                    print("✅ VFS: 数据库记录删除成功")
                     
                     // 更新同步状态（删除元数据）
                     print("🔄 VFS: 删除同步元数据...")
@@ -1301,15 +1404,23 @@ public class VirtualFileSystem {
             print("📂 VFS: 目标路径（直接映射模式）: \(destinationPath)")
         }
         
+        let operationId = operationManager.addOperation(
+            type: .move,
+            fileName: itemName,
+            filePath: destinationPath
+        )
+        
         // 3. 在 WebDAV 上移动
         print("📦 VFS: 移动远程文件...")
         print("   源: \(sourcePath)")
         print("   目标: \(destinationPath)")
         
         do {
+            operationManager.updateOperation(id: operationId, status: .inProgress)
             try await storageClient.move(from: sourcePath, to: destinationPath)
             print("✅ VFS: 远程移动成功")
         } catch {
+            operationManager.updateOperation(id: operationId, status: .failed, errorMessage: error.localizedDescription)
             print("❌ VFS: 远程移动失败: \(error)")
             throw VFSError.fileOperationFailed("移动失败: \(error.localizedDescription)")
         }
@@ -1336,6 +1447,8 @@ public class VirtualFileSystem {
         syncManager.updateMetadata(metadata)
         print("✅ VFS: 同步状态已更新")
         
+        operationManager.updateOperation(id: operationId, status: .completed)
+        
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("✅ VFS.moveItem: 移动完成")
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -1350,20 +1463,6 @@ public class VirtualFileSystem {
             syncStatus: .synced,
             remotePath: destinationPath
         )
-    }
-    
-    private func deleteDirectoryRecursive(directory: VirtualDirectory, storageClient: StorageClient) async throws {
-        // 1. 删除所有子项
-        let children = try database.listChildren(parentId: directory.id)
-        for child in children {
-            try await delete(itemId: child.id)
-        }
-        
-        // 2. 删除远程目录
-        try await storageClient.delete(path: directory.remotePath)
-        
-        // 3. 从数据库删除
-        try database.deleteDirectory(id: directory.id)
     }
 }
 

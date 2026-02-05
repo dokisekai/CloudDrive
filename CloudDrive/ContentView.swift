@@ -57,7 +57,7 @@ struct ContentView: View {
                     // 保险库列表
                     List {
                         ForEach(appState.vaults) { vault in
-                            VaultRow(vault: vault, appState: appState)
+                            VaultRow(vaultId: vault.id, appState: appState)
                         }
                         .onDelete(perform: deleteVaults)
                     }
@@ -117,93 +117,153 @@ struct ContentView: View {
 }
 
 struct VaultRow: View {
-    let vault: VaultInfo
+    let vaultId: String
     @ObservedObject var appState: AppState
     @State private var showingInFinder = false
     @State private var showingUnmountConfirmation = false
+    @State private var showingMountConfirmation = false
     @State private var showingDeleteConfirmation = false
+    @State private var isMounting = false
+    @State private var mountError: String?
+    
+    // 从 vaults 数组动态获取当前 vault，确保实时更新
+    private var vault: VaultInfo? {
+        appState.vaults.first { $0.id == vaultId }
+    }
     
     var body: some View {
-        HStack {
-            Image(systemName: vault.isMounted ? "externaldrive.fill.badge.checkmark" : "externaldrive.fill")
-                .font(.title2)
-                .foregroundColor(vault.isMounted ? .green : .blue)
-            
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(vault.name)
-                        .font(.headline)
-                    
-                    if vault.isMounted {
-                        Text("已挂载")
-                            .font(.caption)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.green.opacity(0.2))
-                            .foregroundColor(.green)
-                            .cornerRadius(4)
+        guard let vault = vault else {
+            return AnyView(Text("保险库不存在").foregroundColor(.red))
+        }
+
+        return AnyView(
+            HStack {
+                Image(systemName: vault.isMounted ? "externaldrive.fill.badge.checkmark" : "externaldrive.fill")
+                    .font(.title2)
+                    .foregroundColor(vault.isMounted ? .green : .blue)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(vault.name)
+                            .font(.headline)
+
+                        if vault.isMounted {
+                            Text("已挂载")
+                                .font(.caption)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.green.opacity(0.2))
+                                .foregroundColor(.green)
+                                .cornerRadius(4)
+                        }
                     }
-                }
-                
-                if let webdavURL = vault.webdavURL {
-                    Text(webdavURL)
-                        .font(.caption)
+
+                    if let webdavURL = vault.webdavURL {
+                        Text(webdavURL)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    Text("创建于 \(vault.createdAt, style: .date)")
+                        .font(.caption2)
                         .foregroundColor(.secondary)
                 }
-                
-                Text("创建于 \(vault.createdAt, style: .date)")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-            
-            Spacer()
-            
-            if vault.isMounted {
-                Button(action: {
-                    showingUnmountConfirmation = true
-                }) {
-                    Label("卸载", systemImage: "eject")
-                        .font(.caption)
-                }
-                .buttonStyle(.bordered)
-                .alert("确认卸载", isPresented: $showingUnmountConfirmation) {
-                    Button("取消", role: .cancel) { }
-                    Button("卸载", role: .destructive) {
-                        appState.unmountVault(vault)
+
+                Spacer()
+
+                if vault.isMounted {
+                    Button(action: {
+                        showingUnmountConfirmation = true
+                    }) {
+                        Label("卸载", systemImage: "eject")
+                            .font(.caption)
                     }
-                } message: {
-                    Text("确定要卸载保险库 \"\(vault.name)\" 吗？")
-                }
-            } else {
-                Button(action: {
-                    showingDeleteConfirmation = true
-                }) {
-                    Label("删除", systemImage: "trash")
-                        .font(.caption)
-                        .foregroundColor(.red)
-                }
-                .buttonStyle(.bordered)
-                .alert("确认删除", isPresented: $showingDeleteConfirmation) {
-                    Button("取消", role: .cancel) { }
-                    Button("删除", role: .destructive) {
-                        appState.deleteVault(vault)
+                    .buttonStyle(.bordered)
+                    .alert("确认卸载", isPresented: $showingUnmountConfirmation) {
+                        Button("取消", role: .cancel) { }
+                        Button("卸载", role: .destructive) {
+                            appState.unmountVault(vault)
+                        }
+                    } message: {
+                        Text("确定要卸载保险库 \"\(vault.name)\" 吗？")
                     }
-                } message: {
-                    Text("确定要删除保险库 \"\(vault.name)\" 吗？此操作不可恢复。")
+                } else {
+                    // 未挂载时显示挂载和删除按钮
+                    HStack(spacing: 8) {
+                        Button(action: {
+                            showingMountConfirmation = true
+                        }) {
+                            Label("挂载", systemImage: "play.circle")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isMounting || vault.isMounted)
+                        .alert("确认挂载", isPresented: $showingMountConfirmation) {
+                            Button("取消", role: .cancel) { }
+                            Button("挂载") {
+                                Task {
+                                    await mountVault(vault)
+                                }
+                            }
+                        } message: {
+                            Text("确定要挂载保险库 \"\(vault.name)\" 吗？")
+                        }
+                        .alert("挂载失败", isPresented: Binding<Bool>(
+                            get: { mountError != nil },
+                            set: { if !$0 { mountError = nil } }
+                        )) {
+                            Button("确定", role: .cancel) { }
+                        } message: {
+                            if let error = mountError {
+                                Text(error)
+                            }
+                        }
+
+                        Button(action: {
+                            showingDeleteConfirmation = true
+                        }) {
+                            Label("删除", systemImage: "trash")
+                                .font(.caption)
+                                .foregroundColor(.red)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(vault.isMounted)
+                        .alert("确认删除", isPresented: $showingDeleteConfirmation) {
+                            Button("取消", role: .cancel) { }
+                            Button("删除", role: .destructive) {
+                                appState.deleteVault(vault)
+                            }
+                        } message: {
+                            Text("确定要删除保险库 \"\(vault.name)\" 吗？此操作不可恢复。")
+                        }
+                    }
+
+                    Button(action: {
+                        openInFinder()
+                    }) {
+                        Label("在 Finder 中打开", systemImage: "folder")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!vault.isMounted)
                 }
             }
-            
-            Button(action: {
-                openInFinder()
-            }) {
-                Label("在 Finder 中打开", systemImage: "folder")
-                    .font(.caption)
-            }
-            .buttonStyle(.bordered)
-            .disabled(!vault.isMounted)
+            .padding(.vertical, 8)
+            .opacity(vault.isMounted ? 1.0 : 0.6)
+        )
+    }
+    
+    private func mountVault(_ vault: VaultInfo) async {
+        isMounting = true
+        mountError = nil
+        
+        do {
+            try await appState.remountVault(vault)
+        } catch {
+            mountError = error.localizedDescription
         }
-        .padding(.vertical, 8)
-        .opacity(vault.isMounted ? 1.0 : 0.6)
+        
+        isMounting = false
     }
     
     private func openInFinder() {

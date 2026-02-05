@@ -15,6 +15,7 @@ class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     private let vfs = VirtualFileSystem.shared
     private let cacheManager = CacheManager.shared
     private let sync = FileProviderSync.shared
+    private let operationManager = FileOperationManager.shared
     let domain: NSFileProviderDomain
     private var vaultInfo: VaultInfo?
     
@@ -105,11 +106,13 @@ class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 vfs.configureWebDAV(baseURL: url, username: webdavUsername, password: password)
                 logSuccess(.webdav, "✅ WebDAV 配置完成")
                 
-                // 配置 SyncManager
-                let webdavClient = WebDAVClient.shared
-                let storageClient = WebDAVStorageAdapter(webDAVClient: webdavClient)
-                SyncManager.shared.configure(storageClient: storageClient)
-                logSuccess(.sync, "✅ SyncManager 已配置")
+                // 获取 VFS 配置的 storageClient，确保 SyncManager 使用同一个实例
+                if let vfsStorageClient = vfs.getStorageClient() {
+                    SyncManager.shared.configure(storageClient: vfsStorageClient)
+                    logSuccess(.sync, "✅ SyncManager 已配置（使用 VFS 的 storageClient）")
+                } else {
+                    logWarning(.sync, "⚠️ VFS storageClient 未配置")
+                }
                 
                 // 设置当前保险库 ID
                 Task {
@@ -378,10 +381,18 @@ class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                    logInfo(.fileOps, "📁 FileProvider: 创建目录操作")
                    logInfo(.fileOps, "   调用: vfs.createDirectory(name: \(itemTemplate.filename), parentId: \(actualParentId))")
                    
+                   let operationId = operationManager.addOperation(
+                       type: .create,
+                       fileName: itemTemplate.filename,
+                       filePath: actualParentId
+                   )
+                   
                    let vfsItem = try await self.vfs.createDirectory(
                        name: itemTemplate.filename,
                        parentId: actualParentId
                    )
+                   
+                   operationManager.updateOperation(id: operationId, status: .completed)
                    
                    logSuccess(.fileOps, "✅ FileProvider: VFS创建目录成功")
                    logInfo(.fileOps, "   返回的VFS项目ID: \(vfsItem.id)")
@@ -412,11 +423,19 @@ class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                    logInfo(.fileOps, "   调用: vfs.uploadFile(localURL: \(url.path), name: \(itemTemplate.filename), parentId: \(actualParentId))")
                    
                    do {
+                       let operationId = operationManager.addOperation(
+                           type: .upload,
+                           fileName: itemTemplate.filename,
+                           filePath: actualParentId
+                       )
+                       
                        let vfsItem = try await self.vfs.uploadFile(
                            localURL: url,
                            name: itemTemplate.filename,
                            parentId: actualParentId
                        )
+                       
+                       operationManager.updateOperation(id: operationId, status: .completed)
                        
                        logSuccess(.fileOps, "✅ FileProvider: VFS上传文件成功")
                        logInfo(.fileOps, "   返回的VFS项目ID: \(vfsItem.id)")
@@ -542,6 +561,13 @@ class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                    }
                    
                    logInfo(.fileOps, "准备覆盖文件 \(fileId)")
+                   
+                   let operationId = operationManager.addOperation(
+                       type: .modify,
+                       fileName: item.filename,
+                       filePath: actualParentId
+                   )
+                   
                    try await self.vfs.delete(itemId: fileId)
                    
                    let vfsItem = try await self.vfs.uploadFile(
@@ -549,6 +575,8 @@ class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                        name: item.filename,
                        parentId: actualParentId
                    )
+                   
+                   operationManager.updateOperation(id: operationId, status: .completed)
                    
                    progress.completedUnitCount = 100
                    
@@ -642,34 +670,44 @@ class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
            }
            
            do {
-               let fileId = identifier.rawValue
-               logInfo(.fileOps, "准备删除文件: \(fileId)")
+                   let fileId = identifier.rawValue
+                   logInfo(.fileOps, "准备删除文件: \(fileId)")
+                   
+                   // 检查是否为未下载的文件（仅云端文件）
+                   let isCached = self.cacheManager.isCached(fileId: fileId)
+                   logInfo(.fileOps, "文件缓存状态: \(isCached ? "已缓存" : "未缓存（仅云端）")")
+                   
+                   let fileName = URL(fileURLWithPath: fileId).lastPathComponent
+                   let operationId = operationManager.addOperation(
+                       type: .delete,
+                       fileName: fileName,
+                       filePath: fileId
+                   )
+                   
+                   // 步骤1: 先删除本地缓存（如果有）
+                   if isCached {
+                       logInfo(.fileOps, "清理本地缓存文件: \(fileId)")
+                       try? self.cacheManager.removeCachedFile(fileId: fileId)
+                       logSuccess(.fileOps, "✅ 本地缓存清理完成")
+                   }
+                   
+                   // 步骤2: 后台异步删除云端文件（不等待完成）
+                   logInfo(.fileOps, "后台异步删除云端文件: \(fileId)")
+                   Task(priority: .background) { [weak self] in
+                       guard let self = self else { return }
+                       do {
+                           logInfo(.fileOps, "🔄 开始后台删除云端文件: \(fileId)")
+                           operationManager.updateOperation(id: operationId, status: .inProgress)
+                           try await self.vfs.delete(itemId: fileId)
+                           operationManager.updateOperation(id: operationId, status: .completed)
+                           logSuccess(.fileOps, "✅ 云端文件删除成功: \(fileId)")
+                       } catch {
+                           operationManager.updateOperation(id: operationId, status: .failed, errorMessage: error.localizedDescription)
+                           logError(.fileOps, "❌ 云端文件删除失败: \(fileId) - \(error.localizedDescription)")
+                       }
+                   }
                
-               // 检查是否为未下载的文件（仅云端文件）
-               let isCached = self.cacheManager.isCached(fileId: fileId)
-               logInfo(.fileOps, "文件缓存状态: \(isCached ? "已缓存" : "未缓存（仅云端）")")
-               
-               // 对于未下载的文件，直接删除云端文件，不进入回收站
-               if !isCached {
-                   logInfo(.fileOps, "未下载的文件，直接删除云端")
-               }
-               
-               // 调用 VFS 删除（会删除云端文件）
-               logInfo(.fileOps, "调用 VFS 删除: \(fileId)")
-               
-               // 直接调用删除操作（移除超时包装）
-               try await self.vfs.delete(itemId: fileId)
-               
-               logSuccess(.fileOps, "✅ VFS 删除成功: \(fileId)")
-               
-               // 清理本地缓存（如果有）
-               if isCached {
-                   logInfo(.fileOps, "清理本地缓存文件: \(fileId)")
-                   try? self.cacheManager.removeCachedFile(fileId: fileId)
-                   logSuccess(.fileOps, "✅ 本地缓存清理完成")
-               }
-               
-               // 通知主应用文件已变化
+               // 步骤3: 立即通知主应用文件已变化
                if let vaultId = self.vaultInfo?.id {
                    logInfo(.sync, "📤 发送文件删除通知 - 保险库: \(vaultId), 文件: \(fileId)")
                    self.sync.notifyFileChanged(vaultId: vaultId, fileId: fileId)
@@ -678,8 +716,9 @@ class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                    logWarning(.sync, "⚠️ 无保险库信息，无法发送通知")
                }
                
+               // 步骤4: 立即返回成功（不等待云端删除完成）
                logInfo(.fileOps, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-               logSuccess(.fileOps, "✅ 项目删除成功: \(fileId)")
+               logSuccess(.fileOps, "✅ 项目删除成功（本地已删除，云端删除在后台进行）: \(fileId)")
                logInfo(.fileOps, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                safeCompletion(nil)
                
@@ -703,6 +742,101 @@ class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                logError(.fileOps, "❌ 删除项目失败: \(error.localizedDescription)")
                let fpError = NSFileProviderError(.serverUnreachable)
                safeCompletion(fpError)
+           }
+       }
+       
+       return progress
+   }
+    
+    func reparentItem(identifier: NSFileProviderItemIdentifier,
+                      toParentItemIdentifier parentItemIdentifier: NSFileProviderItemIdentifier,
+                      newName: String?,
+                      baseVersion version: NSFileProviderItemVersion,
+                      request: NSFileProviderRequest,
+                      completionHandler: @escaping (NSFileProviderItem?, Error?) -> Void) -> Progress {
+       
+       logInfo(.fileOps, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+       logInfo(.fileOps, "📁 开始移动/重命名项目")
+       logInfo(.fileOps, "项目ID: \(identifier.rawValue)")
+       logInfo(.fileOps, "目标父ID: \(parentItemIdentifier.rawValue)")
+       logInfo(.fileOps, "新名称: \(newName ?? "未改变")")
+       logInfo(.fileOps, "基础版本: \(version)")
+       logInfo(.fileOps, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+       
+       let progress = Progress(totalUnitCount: 100)
+       
+       Task { [weak self] in
+           guard let self = self else {
+               logError(.fileOps, "移动/重命名项目失败: self 为空")
+               completionHandler(nil, NSFileProviderError(.noSuchItem))
+               return
+           }
+           
+           do {
+               let fileId = identifier.rawValue
+               let targetParentId = parentItemIdentifier.rawValue
+               let actualTargetParentId: String
+               if targetParentId == NSFileProviderItemIdentifier.rootContainer.rawValue {
+                   actualTargetParentId = "ROOT"
+               } else {
+                   actualTargetParentId = targetParentId.hasPrefix("/") ? targetParentId : "/\(targetParentId)"
+               }
+               
+               let finalName = newName ?? URL(fileURLWithPath: fileId).lastPathComponent
+               
+               logInfo(.fileOps, "📁 FileProvider.reparentItem: 开始移动/重命名")
+               logInfo(.fileOps, "   源文件ID: \(fileId)")
+               logInfo(.fileOps, "   目标父ID: \(actualTargetParentId)")
+               logInfo(.fileOps, "   最终名称: \(finalName)")
+               
+               let operationId = operationManager.addOperation(
+                   type: .move,
+                   fileName: finalName,
+                   filePath: actualTargetParentId
+               )
+               
+               let vfsItem = try await self.vfs.moveItem(
+                   itemId: fileId,
+                   newParentId: actualTargetParentId,
+                   newName: newName
+               )
+               
+               operationManager.updateOperation(id: operationId, status: .completed)
+               
+               logSuccess(.fileOps, "✅ FileProvider: VFS移动/重命名成功")
+               logInfo(.fileOps, "   返回的VFS项目ID: \(vfsItem.id)")
+               logInfo(.fileOps, "   返回的VFS项目名称: \(vfsItem.name)")
+               
+               progress.completedUnitCount = 100
+               
+               let item = FileProviderItem(vfsItem: vfsItem)
+               
+               // 通知主应用文件已变化
+               if let vaultId = self.vaultInfo?.id {
+                   logInfo(.sync, "📤 发送文件移动/重命名通知 - 保险库: \(vaultId), 文件: \(vfsItem.id)")
+                   self.sync.notifyFileChanged(vaultId: vaultId, fileId: vfsItem.id)
+                   logSuccess(.sync, "✅ 文件移动/重命名通知发送完成")
+               } else {
+                   logWarning(.sync, "⚠️ 无保险库信息，无法发送通知")
+               }
+               
+               logSuccess(.fileOps, "✅ 项目移动/重命名完成: \(finalName)")
+               completionHandler(item, nil)
+               
+           } catch let error as VFSError {
+               logError(.fileOps, "❌ FileProvider: reparentItem 中发生 VFSError: \(error)")
+               let fpError = convertVFSErrorToFileProviderError(error)
+               progress.completedUnitCount = 100
+               completionHandler(nil, fpError)
+           } catch let error as NSFileProviderError {
+               logError(.fileOps, "❌ FileProvider: reparentItem 中发生 NSFileProviderError: \(error)")
+               progress.completedUnitCount = 100
+               completionHandler(nil, error)
+           } catch {
+               logError(.fileOps, "❌ FileProvider: reparentItem 中发生未知错误: \(error)")
+               let fpError = NSFileProviderError(.cannotSynchronize)
+               progress.completedUnitCount = 100
+               completionHandler(nil, fpError)
            }
        }
        

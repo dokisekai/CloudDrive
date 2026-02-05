@@ -24,12 +24,17 @@ struct SettingsView: View {
                     Label("缓存", systemImage: "externaldrive")
                 }
             
+            LogManagementView()
+                .tabItem {
+                    Label("日志", systemImage: "doc.text")
+                }
+            
             AboutView()
                 .tabItem {
                     Label("关于", systemImage: "info.circle")
                 }
         }
-        .frame(width: 500, height: 400)
+        .frame(width: 600, height: 450)
     }
 }
 

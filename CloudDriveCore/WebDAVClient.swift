@@ -267,11 +267,23 @@ public class WebDAVClient {
     
     /// 上传文件（PUT）
     public func uploadFile(localURL: URL, to remotePath: String, progress: @escaping (Double) -> Void) async throws {
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("⬆️ WebDAV.uploadFile: 开始上传文件")
+        print("   本地路径: \(localURL.path)")
+        print("   远程路径: \(remotePath)")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        
         guard let baseURL = baseURL else {
+            print("❌ WebDAV: 客户端未配置")
             throw WebDAVError.notConfigured
         }
         
+        print("✅ WebDAV: 客户端已配置")
+        print("   Base URL: \(baseURL.absoluteString)")
+        
         let url = baseURL.appendingPathComponent(remotePath)
+        print("📡 WebDAV: 完整上传URL: \(url.absoluteString)")
+        
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         
@@ -281,19 +293,48 @@ public class WebDAVClient {
             if let authData = authString.data(using: .utf8) {
                 let base64Auth = authData.base64EncodedString()
                 request.setValue("Basic \(base64Auth)", forHTTPHeaderField: "Authorization")
+                print("🔑 WebDAV: 已添加认证头")
             }
+        } else {
+            print("⚠️ WebDAV: 警告 - 没有配置认证凭据")
+        }
+        
+        // 检查本地文件是否存在
+        guard FileManager.default.fileExists(atPath: localURL.path) else {
+            print("❌ WebDAV: 本地文件不存在: \(localURL.path)")
+            throw WebDAVError.fileNotFound
         }
         
         let data = try Data(contentsOf: localURL)
-        request.httpBody = data
+        print("📊 WebDAV: 读取本地文件成功")
+        print("   文件大小: \(data.count) 字节")
         
-        let (_, response) = try await session.data(for: request)
+        request.httpBody = data
+        request.setValue("\(data.count)", forHTTPHeaderField: "Content-Length")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        
+        print("📤 WebDAV: 发送PUT请求...")
+        let (responseData, response) = try await session.data(for: request)
+        
+        print("📥 WebDAV: 收到响应")
+        if let httpResponse = response as? HTTPURLResponse {
+            print("   状态码: \(httpResponse.statusCode)")
+            print("   响应头: \(httpResponse.allHeaderFields)")
+            
+            if !responseData.isEmpty {
+                print("   响应内容: \(String(data: responseData, encoding: .utf8) ?? "N/A")")
+            }
+        }
         
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            print("❌ WebDAV: 上传失败，状态码: \(statusCode)")
             throw WebDAVError.serverError(statusCode)
         }
+        
+        print("✅ WebDAV: 文件上传成功")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     }
     
     /// 创建目录（MKCOL）- 支持递归创建父目录
@@ -602,6 +643,7 @@ public enum WebDAVError: Error, CustomNSError {
     case serverError(Int)
     case parseError
     case authenticationFailed
+    case fileNotFound
     
     public static var errorDomain: String {
         return "com.clouddrive.webdav"
@@ -619,6 +661,8 @@ public enum WebDAVError: Error, CustomNSError {
             return 1003
         case .authenticationFailed:
             return 1004
+        case .fileNotFound:
+            return 1005
         }
     }
     
@@ -634,6 +678,8 @@ public enum WebDAVError: Error, CustomNSError {
             return [NSLocalizedDescriptionKey: "解析WebDAV响应失败"]
         case .authenticationFailed:
             return [NSLocalizedDescriptionKey: "WebDAV认证失败"]
+        case .fileNotFound:
+            return [NSLocalizedDescriptionKey: "文件不存在"]
         }
     }
 }

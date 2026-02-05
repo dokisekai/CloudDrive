@@ -345,7 +345,10 @@ class AppState: ObservableObject {
         
         // 更新挂载状态
         if let index = vaults.firstIndex(where: { $0.id == vaultId }) {
-            vaults[index].isMounted = true
+            // 创建新的 VaultInfo 实例，触发 SwiftUI 更新
+            var updatedVault = vaults[index]
+            updatedVault.isMounted = true
+            vaults[index] = updatedVault
             saveVaults()
         }
         
@@ -359,7 +362,10 @@ class AppState: ObservableObject {
         // 更新挂载状态
         if let currentVault = currentVault,
            let index = vaults.firstIndex(where: { $0.id == currentVault.id }) {
-            vaults[index].isMounted = false
+            // 创建新的 VaultInfo 实例，触发 SwiftUI 更新
+            var updatedVault = vaults[index]
+            updatedVault.isMounted = false
+            vaults[index] = updatedVault
             saveVaults()
         }
         
@@ -471,12 +477,101 @@ class AppState: ObservableObject {
         }
     }
     
+    /// 重新挂载保险库（从 Keychain 获取密码）
+    func remountVault(_ vault: VaultInfo) async throws {
+        print("📂 AppState: 重新挂载保险库: \(vault.name)")
+        
+        // 检查是否已经挂载
+        if vault.isMounted, currentVault?.id == vault.id {
+            print("✅ AppState: 保险库已经挂载，无需重复挂载")
+            return
+        }
+        
+        guard let webdavURL = vault.webdavURL,
+              let webdavUsername = vault.webdavUsername else {
+            throw NSError(domain: "CloudDrive", code: -1, userInfo: [NSLocalizedDescriptionKey: "保险库配置不完整"])
+        }
+        
+        // 从 Keychain 获取 WebDAV 密码
+        guard let webdavPassword = getWebDAVPassword(for: vault.id) else {
+            throw NSError(domain: "CloudDrive", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法获取 WebDAV 密码，可能需要重新配置"])
+        }
+        
+        print("✅ AppState: 从 Keychain 获取到密码")
+        
+        guard let url = URL(string: webdavURL) else {
+            throw NSError(domain: "CloudDrive", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效的 WebDAV URL"])
+        }
+        
+        // 配置 WebDAV
+        vfs.configureWebDAV(baseURL: url, username: webdavUsername, password: webdavPassword)
+        
+        // 配置 SyncManager
+        let webdavClient = WebDAVClient.shared
+        let storageClient = WebDAVStorageAdapter(webDAVClient: webdavClient)
+        SyncManager.shared.configure(storageClient: storageClient)
+        print("✅ AppState: SyncManager 已配置")
+        
+        // 根据存储路径判断是直接映射模式还是传统模式
+        // 直接映射模式：storagePath == "/"
+        // 传统模式：storagePath 包含 vaultId
+        if vault.storagePath == "/" {
+            print("📂 AppState: 使用直接映射模式挂载")
+            // 使用直接映射模式挂载
+            try await vfs.remountDirectMappingVault(vaultId: vault.id, storagePath: vault.storagePath)
+        } else {
+            print("📂 AppState: 使用传统模式挂载")
+            // 使用传统模式挂载（无加密）
+            try await vfs.mountVaultWithoutEncryption(storagePath: vault.storagePath, vaultId: vault.id)
+        }
+        
+        // 更新当前保险库和状态
+        currentVault = vault
+        isVaultUnlocked = true
+        
+        // 更新挂载状态
+        if let index = vaults.firstIndex(where: { $0.id == vault.id }) {
+            // 创建新的 VaultInfo 实例，触发 SwiftUI 更新
+            var updatedVault = vaults[index]
+            updatedVault.isMounted = true
+            vaults[index] = updatedVault
+            saveVaults()
+        }
+        
+        print("✅ AppState: 保险库重新挂载成功")
+    }
+
+    /// 从 Keychain 获取 WebDAV 密码
+    private func getWebDAVPassword(for vaultId: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrAccount as String: "webdav-password-\(vaultId)",
+            kSecAttrService as String: "net.aabg.CloudDrive",
+            kSecReturnData as String: true,
+            kSecAttrAccessGroup as String: "group.net.aabg.CloudDrive"
+        ]
+        
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        
+        if status == errSecSuccess,
+           let data = result as? Data,
+           let password = String(data: data, encoding: .utf8) {
+            return password
+        }
+        
+        return nil
+    }
+
     /// 卸载保险库
     func unmountVault(_ vault: VaultInfo) {
         print("📤 AppState: 卸载保险库: \(vault.name)")
         
         if let index = vaults.firstIndex(where: { $0.id == vault.id }) {
-            vaults[index].isMounted = false
+            // 创建新的 VaultInfo 实例，触发 SwiftUI 更新
+            var updatedVault = vaults[index]
+            updatedVault.isMounted = false
+            vaults[index] = updatedVault
             saveVaults()
         }
         
@@ -492,8 +587,13 @@ class AppState: ObservableObject {
     private func loadVaults() {
         if let data = userDefaults.data(forKey: vaultsKey),
            let decoded = try? JSONDecoder().decode([VaultInfo].self, from: data) {
-            vaults = decoded
-            print("📂 AppState: 加载了 \(vaults.count) 个保险库")
+            // 从持久化加载的保险库默认为未挂载状态
+            vaults = decoded.map { vault in
+                var updatedVault = vault
+                updatedVault.isMounted = false
+                return updatedVault
+            }
+            print("📂 AppState: 加载了 \(vaults.count) 个保险库（全部默认为未挂载状态）")
         }
     }
     

@@ -29,7 +29,7 @@ public class Logger {
     private var osLogs: [String: OSLog] = [:]
     
     // 日志类别
-    public enum Category: String {
+    public enum Category: String, CaseIterable {
         case system = "system"           // 系统日志
         case fileOps = "file-operations" // 文件操作日志
         case webdav = "webdav"          // WebDAV 日志
