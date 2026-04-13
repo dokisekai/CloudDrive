@@ -31,6 +31,7 @@ public class SyncManager {
     private let networkMonitor = NWPathMonitor()
     private var networkStatus: NetworkStatus = .unknown
     private var isProcessingQueue = false
+    private let processingLock = NSLock()  // 保护 isProcessingQueue 的锁
     
     // 存储客户端引用
     private var storageClient: StorageClient?
@@ -71,6 +72,11 @@ public class SyncManager {
     public func configure(storageClient: StorageClient) {
         self.storageClient = storageClient
         logInfo(.sync, "存储客户端已配置")
+    }
+    
+    /// 获取存储客户端（供其他模块使用）
+    public func getStorageClient() -> StorageClient? {
+        return storageClient
     }
     
     // MARK: - 网络监控
@@ -201,16 +207,20 @@ public class SyncManager {
             return
         }
         
+        processingLock.lock()
         guard !isProcessingQueue else {
+            processingLock.unlock()
             logInfo(.sync, "同步队列正在处理中")
             return
         }
-        
         isProcessingQueue = true
+        processingLock.unlock()
         
-        Task {
-            await processQueueAsync()
-            isProcessingQueue = false
+        Task { [weak self] in
+            await self?.processQueueAsync()
+            self?.processingLock.lock()
+            self?.isProcessingQueue = false
+            self?.processingLock.unlock()
         }
     }
     
@@ -224,44 +234,40 @@ public class SyncManager {
         
         logInfo(.sync, "开始处理同步队列: \(items.count) 个项目")
         
-        var processedItems: [String] = []
-        var failedItems: [(String, String)] = []
+        var processedIds: Set<String> = []       // 成功处理的 ID
+        var failedBeyondRetry: Set<String> = []  // 超过重试次数需移除的 ID
         
         for item in items {
             do {
                 try await processQueueItem(item)
-                processedItems.append(item.id)
+                processedIds.insert(item.id)
                 logSuccess(.sync, "同步成功: \(item.operation.fileId)")
             } catch {
-                failedItems.append((item.id, error.localizedDescription))
                 logError(.sync, "同步失败: \(item.operation.fileId) - \(error.localizedDescription)")
                 
                 // 更新重试次数
                 syncQueue.sync {
                     if let index = syncQueueItems.firstIndex(where: { $0.id == item.id }) {
-                        var updatedItem = syncQueueItems[index]
-                        updatedItem.retryCount += 1
-                        updatedItem.lastError = error.localizedDescription
+                        syncQueueItems[index].retryCount += 1
+                        syncQueueItems[index].lastError = error.localizedDescription
                         
-                        // 如果重试次数超过3次，移除
-                        if updatedItem.retryCount >= 3 {
-                            syncQueueItems.remove(at: index)
-                            logWarning(.sync, "同步失败次数过多，移除队列: \(item.operation.fileId)")
-                        } else {
-                            syncQueueItems[index] = updatedItem
+                        // 如果重试次数超过3次，标记为需要移除
+                        if syncQueueItems[index].retryCount >= 3 {
+                            failedBeyondRetry.insert(item.id)
+                            logWarning(.sync, "同步失败次数过多，将移除: \(item.operation.fileId)")
                         }
                     }
                 }
             }
         }
         
-        // 移除成功处理的项目
+        // 移除成功处理的和超过重试次数的项目
         syncQueue.sync {
-            syncQueueItems.removeAll { processedItems.contains($0.id) }
+            syncQueueItems.removeAll { processedIds.contains($0.id) || failedBeyondRetry.contains($0.id) }
         }
         saveSyncQueue()
         
-        logSuccess(.sync, "同步队列处理完成 - 成功: \(processedItems.count), 失败: \(failedItems.count)")
+        logSuccess(.sync, "同步队列处理完成 - 成功: \(processedIds.count), 放弃: \(failedBeyondRetry.count)")
     }
     
     private func processQueueItem(_ item: SyncQueueItem) async throws {
@@ -289,6 +295,7 @@ public class SyncManager {
                     metadata.syncStatus = .synced
                     metadata.remotePath = remotePath
                     metadata.remoteModifiedAt = Date()
+                    metadata.lastSyncTime = Date()
                     self.updateMetadata(metadata)
                 }
                 
@@ -317,6 +324,7 @@ public class SyncManager {
                     metadata.syncStatus = .synced
                     metadata.localPath = localPath
                     metadata.localModifiedAt = Date()
+                    metadata.lastSyncTime = Date()
                     self.updateMetadata(metadata)
                 }
                 

@@ -43,7 +43,7 @@ public enum SyncStatus: String, Codable {
     /// 是否需要同步
     public var needsSync: Bool {
         switch self {
-        case .pendingUpload, .pendingDelete, .conflict, .pendingMove, .partialUpload, .partialDownload:
+        case .pendingUpload, .pendingDelete, .conflict, .pendingMove, .partialUpload, .partialDownload, .error:
             return true
         default:
             return false
@@ -221,7 +221,8 @@ public struct FileMetadata: Codable {
     public var localModifiedAt: Date?
     public var remoteModifiedAt: Date?
     public var etag: String?
-    public var downloadProgress: Double  // 新增下载进度字段 (0.0 到 1.0)
+    public var downloadProgress: Double  // 下载进度字段 (0.0 到 1.0)
+    public var lastSyncTime: Date?       // 最后成功同步时间
     
     public init(
         fileId: String,
@@ -235,7 +236,8 @@ public struct FileMetadata: Codable {
         localModifiedAt: Date? = nil,
         remoteModifiedAt: Date? = nil,
         etag: String? = nil,
-        downloadProgress: Double = 0.0  // 默认下载进度为0
+        downloadProgress: Double = 0.0,
+        lastSyncTime: Date? = nil
     ) {
         self.fileId = fileId
         self.name = name
@@ -249,16 +251,17 @@ public struct FileMetadata: Codable {
         self.remoteModifiedAt = remoteModifiedAt
         self.etag = etag
         self.downloadProgress = downloadProgress
+        self.lastSyncTime = lastSyncTime
     }
     
-    /// 检查是否有冲突
+    /// 检查是否有冲突（基于 lastSyncTime 判断双向修改）
     public func hasConflict() -> Bool {
         guard let localMod = localModifiedAt,
-              let remoteMod = remoteModifiedAt else {
+              let remoteMod = remoteModifiedAt,
+              let syncTime = lastSyncTime else {
             return false
         }
-        
-        // 如果本地和远程都有修改，且时间不一致，则认为有冲突
-        return abs(localMod.timeIntervalSince(remoteMod)) > 1.0 // 允许1秒误差
+        // 本地和远程都在上次同步后被修改过 → 冲突
+        return localMod > syncTime && remoteMod > syncTime
     }
 }
