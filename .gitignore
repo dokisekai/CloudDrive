@@ -1,0 +1,27 @@
+# Build & Output
+.build/
+build/
+DerivedData/
+*.profraw
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Editor & IDE
+*.swp
+*~
+.idea/
+*.iml
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.pbxproj.backup
+*.orig
+.swiftpm/
+
+# Temporary & Disabled
+*.disabled
+*.log

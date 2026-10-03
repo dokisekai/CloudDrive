@@ -1,0 +1,826 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		D718F2732EF2D5A800BD2943 /* UniformTypeIdentifiers.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D718F2722EF2D5A800BD2943 /* UniformTypeIdentifiers.framework */; };
+		D718F27F2EF2D5A800BD2943 /* CloudDriveFileProvider.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D718F2702EF2D5A800BD2943 /* CloudDriveFileProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		D7C341532EF2E1F70016E340 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = D7C341522EF2E1F70016E340 /* libsqlite3.tbd */; };
+		D7C3BUILDFILE0000000001 /* CloudDriveCore in Frameworks */ = {isa = PBXBuildFile; productRef = D7C3PROD0000000000000001 /* CloudDriveCore */; };
+		D7C3BUILDFILE0000000002 /* CloudDriveCore in Frameworks */ = {isa = PBXBuildFile; productRef = D7C3PROD0000000000000002 /* CloudDriveCore */; };
+		F4EB0F52306EF746000D016B /* CryptomatorCryptoLib in Frameworks */ = {isa = PBXBuildFile; productRef = F4EB0F51306EF746000D016B /* CryptomatorCryptoLib */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		D718F27D2EF2D5A800BD2943 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D718F2362EF2D57A00BD2943 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D718F26F2EF2D5A800BD2943;
+			remoteInfo = CloudDriveFileProvider;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		D718F2842EF2D5A800BD2943 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				D718F27F2EF2D5A800BD2943 /* CloudDriveFileProvider.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D718F2A52EF2D5C700BD2943 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D7C3411C2EF2DA920016E340 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		D718F23E2EF2D57A00BD2943 /* CloudDrive.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CloudDrive.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D718F2702EF2D5A800BD2943 /* CloudDriveFileProvider.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = CloudDriveFileProvider.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		D718F2722EF2D5A800BD2943 /* UniformTypeIdentifiers.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UniformTypeIdentifiers.framework; path = System/Library/Frameworks/UniformTypeIdentifiers.framework; sourceTree = SDKROOT; };
+		D718F28A2EF2D5C600BD2943 /* CloudDriveCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = CloudDriveCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		D7C341522EF2E1F70016E340 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		D718F2802EF2D5A800BD2943 /* Exceptions for "Sources/CloudDriveFileProvider" folder in "CloudDriveFileProvider" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = D718F26F2EF2D5A800BD2943 /* CloudDriveFileProvider */;
+		};
+		D718F2A12EF2D5C700BD2943 /* Exceptions for "Sources/CloudDriveCore" folder in "CloudDriveCore" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			publicHeaders = (
+				CloudDriveCore.h,
+			);
+			target = D718F2892EF2D5C600BD2943 /* CloudDriveCore */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		D718F2402EF2D57A00BD2943 /* Sources/CloudDrive */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDrive;
+			sourceTree = "<group>";
+		};
+		D718F2742EF2D5A800BD2943 /* Sources/CloudDriveFileProvider */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				D718F2802EF2D5A800BD2943 /* Exceptions for "Sources/CloudDriveFileProvider" folder in "CloudDriveFileProvider" target */,
+			);
+			path = Sources/CloudDriveFileProvider;
+			sourceTree = "<group>";
+		};
+		D718F28B2EF2D5C600BD2943 /* Sources/CloudDriveCore */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				D718F2A12EF2D5C700BD2943 /* Exceptions for "Sources/CloudDriveCore" folder in "CloudDriveCore" target */,
+			);
+			path = Sources/CloudDriveCore;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000001 /* Sources/CloudDriveContracts */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDriveContracts;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000002 /* Sources/CloudDriveSupport */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDriveSupport;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000003 /* Sources/CloudDrivePersistence */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDrivePersistence;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000004 /* Sources/CloudDriveSecurity */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDriveSecurity;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000005 /* Sources/CloudDriveCrypto */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDriveCrypto;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000006 /* Sources/CloudDriveVaultFormat */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDriveVaultFormat;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000007 /* Sources/CloudDriveSystem */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDriveSystem;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000008 /* Sources/CloudDriveStorage */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDriveStorage;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000009 /* Sources/CloudDriveCache */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDriveCache;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000010 /* Sources/CloudDriveSync */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDriveSync;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000011 /* Sources/CloudDriveVFS */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDriveVFS;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000012 /* Sources/CloudDriveRecovery */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDriveRecovery;
+			sourceTree = "<group>";
+		};
+		D7C3FSSRG0000000013 /* Sources/CloudDrivePreview */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Sources/CloudDrivePreview;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		D718F23B2EF2D57A00BD2943 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D7C3BUILDFILE0000000001 /* CloudDriveCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D718F26D2EF2D5A800BD2943 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D7C3BUILDFILE0000000002 /* CloudDriveCore in Frameworks */,
+				D718F2732EF2D5A800BD2943 /* UniformTypeIdentifiers.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D718F2872EF2D5C600BD2943 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F4EB0F52306EF746000D016B /* CryptomatorCryptoLib in Frameworks */,
+				D7C341532EF2E1F70016E340 /* libsqlite3.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		D718F2352EF2D57A00BD2943 = {
+			isa = PBXGroup;
+			children = (
+				D718F2402EF2D57A00BD2943 /* Sources/CloudDrive */,
+				D718F2742EF2D5A800BD2943 /* Sources/CloudDriveFileProvider */,
+				D718F28B2EF2D5C600BD2943 /* Sources/CloudDriveCore */,
+				D7C3FSSRG0000000001 /* Sources/CloudDriveContracts */,
+				D7C3FSSRG0000000002 /* Sources/CloudDriveSupport */,
+				D7C3FSSRG0000000003 /* Sources/CloudDrivePersistence */,
+				D7C3FSSRG0000000004 /* Sources/CloudDriveSecurity */,
+				D7C3FSSRG0000000005 /* Sources/CloudDriveCrypto */,
+				D7C3FSSRG0000000006 /* Sources/CloudDriveVaultFormat */,
+				D7C3FSSRG0000000007 /* Sources/CloudDriveSystem */,
+				D7C3FSSRG0000000008 /* Sources/CloudDriveStorage */,
+				D7C3FSSRG0000000009 /* Sources/CloudDriveCache */,
+				D7C3FSSRG0000000010 /* Sources/CloudDriveSync */,
+				D7C3FSSRG0000000011 /* Sources/CloudDriveVFS */,
+				D7C3FSSRG0000000012 /* Sources/CloudDriveRecovery */,
+				D7C3FSSRG0000000013 /* Sources/CloudDrivePreview */,
+				D718F2712EF2D5A800BD2943 /* Frameworks */,
+				D718F23F2EF2D57A00BD2943 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		D718F23F2EF2D57A00BD2943 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				D718F23E2EF2D57A00BD2943 /* CloudDrive.app */,
+				D718F2702EF2D5A800BD2943 /* CloudDriveFileProvider.appex */,
+				D718F28A2EF2D5C600BD2943 /* CloudDriveCore.framework */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		D718F2712EF2D5A800BD2943 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				D7C341522EF2E1F70016E340 /* libsqlite3.tbd */,
+				D718F2722EF2D5A800BD2943 /* UniformTypeIdentifiers.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		D718F2852EF2D5C600BD2943 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		D718F23D2EF2D57A00BD2943 /* CloudDrive */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D718F2632EF2D57C00BD2943 /* Build configuration list for PBXNativeTarget "CloudDrive" */;
+			buildPhases = (
+				D718F23A2EF2D57A00BD2943 /* Sources */,
+				D718F23B2EF2D57A00BD2943 /* Frameworks */,
+				D718F23C2EF2D57A00BD2943 /* Resources */,
+				D718F2842EF2D5A800BD2943 /* Embed Foundation Extensions */,
+				D718F2A52EF2D5C700BD2943 /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D718F27E2EF2D5A800BD2943 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				D718F2402EF2D57A00BD2943 /* Sources/CloudDrive */,
+			);
+			name = CloudDrive;
+			packageProductDependencies = (
+				D7C3PROD0000000000000001 /* CloudDriveCore */,
+			);
+			productName = CloudDrive;
+			productReference = D718F23E2EF2D57A00BD2943 /* CloudDrive.app */;
+			productType = "com.apple.product-type.application";
+		};
+		D718F26F2EF2D5A800BD2943 /* CloudDriveFileProvider */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D718F2812EF2D5A800BD2943 /* Build configuration list for PBXNativeTarget "CloudDriveFileProvider" */;
+			buildPhases = (
+				D718F26C2EF2D5A800BD2943 /* Sources */,
+				D718F26D2EF2D5A800BD2943 /* Frameworks */,
+				D718F26E2EF2D5A800BD2943 /* Resources */,
+				D7C3411C2EF2DA920016E340 /* Embed Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				D718F2742EF2D5A800BD2943 /* Sources/CloudDriveFileProvider */,
+			);
+			name = CloudDriveFileProvider;
+			packageProductDependencies = (
+				D7C3PROD0000000000000002 /* CloudDriveCore */,
+			);
+			productName = CloudDriveFileProvider;
+			productReference = D718F2702EF2D5A800BD2943 /* CloudDriveFileProvider.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		D718F2892EF2D5C600BD2943 /* CloudDriveCore */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D718F2A22EF2D5C700BD2943 /* Build configuration list for PBXNativeTarget "CloudDriveCore" */;
+			buildPhases = (
+				D718F2852EF2D5C600BD2943 /* Headers */,
+				D718F2862EF2D5C600BD2943 /* Sources */,
+				D718F2872EF2D5C600BD2943 /* Frameworks */,
+				D718F2882EF2D5C600BD2943 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				D718F28B2EF2D5C600BD2943 /* Sources/CloudDriveCore */,
+			);
+			name = CloudDriveCore;
+			packageProductDependencies = (
+				F4EB0F51306EF746000D016B /* CryptomatorCryptoLib */,
+			);
+			productName = CloudDriveCore;
+			productReference = D718F28A2EF2D5C600BD2943 /* CloudDriveCore.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		D718F2362EF2D57A00BD2943 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				KnownAssetTags = (
+					New,
+				);
+				LastSwiftUpdateCheck = 1610;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					D718F23D2EF2D57A00BD2943 = {
+						CreatedOnToolsVersion = 16.1;
+					};
+					D718F26F2EF2D5A800BD2943 = {
+						CreatedOnToolsVersion = 16.1;
+					};
+					D718F2892EF2D5C600BD2943 = {
+						CreatedOnToolsVersion = 16.1;
+					};
+				};
+			};
+			buildConfigurationList = D718F2392EF2D57A00BD2943 /* Build configuration list for PBXProject "CloudDrive" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = D718F2352EF2D57A00BD2943;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				D7C3LOCALPACKAGE00000001 /* XCLocalSwiftPackageReference "." */,
+				F4EB0F50306EF626000D016B /* XCRemoteSwiftPackageReference "cryptolib-swift" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = D718F23F2EF2D57A00BD2943 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				D718F23D2EF2D57A00BD2943 /* CloudDrive */,
+				D718F26F2EF2D5A800BD2943 /* CloudDriveFileProvider */,
+				D718F2892EF2D5C600BD2943 /* CloudDriveCore */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		D718F23C2EF2D57A00BD2943 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D718F26E2EF2D5A800BD2943 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D718F2882EF2D5C600BD2943 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		D718F23A2EF2D57A00BD2943 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D718F26C2EF2D5A800BD2943 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D718F2862EF2D5C600BD2943 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		D718F27E2EF2D5A800BD2943 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D718F26F2EF2D5A800BD2943 /* CloudDriveFileProvider */;
+			targetProxy = D718F27D2EF2D5A800BD2943 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		D718F2612EF2D57C00BD2943 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 5M96Q46T25;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.1;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		D718F2622EF2D57C00BD2943 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 5M96Q46T25;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.1;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		D718F2642EF2D57C00BD2943 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Sources/CloudDrive/CloudDrive.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				NEW_SETTING = "";
+				PRODUCT_BUNDLE_IDENTIFIER = net.aabg.CloudDrive;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		D718F2652EF2D57C00BD2943 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Sources/CloudDrive/CloudDrive.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				NEW_SETTING = "";
+				PRODUCT_BUNDLE_IDENTIFIER = net.aabg.CloudDrive;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		D718F2822EF2D5A800BD2943 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Sources/CloudDriveFileProvider/CloudDriveFileProvider.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Sources/CloudDriveFileProvider/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = CloudDriveFileProvider;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = net.aabg.CloudDrive.CloudDriveFileProvider;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		D718F2832EF2D5A800BD2943 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Sources/CloudDriveFileProvider/CloudDriveFileProvider.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Sources/CloudDriveFileProvider/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = CloudDriveFileProvider;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = net.aabg.CloudDrive.CloudDriveFileProvider;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		D718F2A32EF2D5C700BD2943 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
+				CODE_SIGN_IDENTITY = "";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				PRODUCT_BUNDLE_IDENTIFIER = net.aabg.CloudDrive.CloudDriveCore;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INSTALL_OBJC_HEADER = NO;
+				SWIFT_VERSION = 5.0;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Debug;
+		};
+		D718F2A42EF2D5C700BD2943 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUILD_LIBRARY_FOR_DISTRIBUTION = YES;
+				CODE_SIGN_IDENTITY = "";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++20";
+				PRODUCT_BUNDLE_IDENTIFIER = net.aabg.CloudDrive.CloudDriveCore;
+				PRODUCT_NAME = "$(TARGET_NAME:c99extidentifier)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_INSTALL_OBJC_HEADER = NO;
+				SWIFT_VERSION = 5.0;
+				VERSIONING_SYSTEM = "apple-generic";
+				VERSION_INFO_PREFIX = "";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		D718F2392EF2D57A00BD2943 /* Build configuration list for PBXProject "CloudDrive" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D718F2612EF2D57C00BD2943 /* Debug */,
+				D718F2622EF2D57C00BD2943 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D718F2632EF2D57C00BD2943 /* Build configuration list for PBXNativeTarget "CloudDrive" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D718F2642EF2D57C00BD2943 /* Debug */,
+				D718F2652EF2D57C00BD2943 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D718F2812EF2D5A800BD2943 /* Build configuration list for PBXNativeTarget "CloudDriveFileProvider" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D718F2822EF2D5A800BD2943 /* Debug */,
+				D718F2832EF2D5A800BD2943 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D718F2A22EF2D5C700BD2943 /* Build configuration list for PBXNativeTarget "CloudDriveCore" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D718F2A32EF2D5C700BD2943 /* Debug */,
+				D718F2A42EF2D5C700BD2943 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		D7C3LOCALPACKAGE00000001 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		F4EB0F50306EF626000D016B /* XCRemoteSwiftPackageReference "cryptolib-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/cryptomator/cryptolib-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.1.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D7C3PROD0000000000000001 /* CloudDriveCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D7C3LOCALPACKAGE00000001 /* XCLocalSwiftPackageReference "." */;
+			productName = CloudDriveCore;
+		};
+		D7C3PROD0000000000000002 /* CloudDriveCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D7C3LOCALPACKAGE00000001 /* XCLocalSwiftPackageReference "." */;
+			productName = CloudDriveCore;
+		};
+		F4EB0F51306EF746000D016B /* CryptomatorCryptoLib */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F4EB0F50306EF626000D016B /* XCRemoteSwiftPackageReference "cryptolib-swift" */;
+			productName = CryptomatorCryptoLib;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = D718F2362EF2D57A00BD2943 /* Project object */;
+}

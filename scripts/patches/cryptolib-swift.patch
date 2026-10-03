@@ -1,0 +1,28 @@
+--- a/Sources/CryptomatorCryptoLib/Cryptor.swift
++++ b/Sources/CryptomatorCryptoLib/Cryptor.swift
+@@ -234,9 +234,11 @@ public class Cryptor {
+ 
+ 		// encrypt and write ciphertext content:
+ 		var chunkNumber: UInt64 = 0
+-		while cleartextStream.hasBytesAvailable {
++		var eof = false
++		while cleartextStream.hasBytesAvailable && !eof {
+ 			try autoreleasepool {
+ 				guard let cleartextChunk = try cleartextStream.read(maxLength: cleartextChunkSize) else {
++					eof = true
+ 					return
+ 				}
+ 				let ciphertextChunk = try encryptSingleChunk(cleartextChunk, chunkNumber: chunkNumber, headerNonce: header.nonce, fileKey: header.contentKey)
+@@ -298,9 +300,11 @@ public class Cryptor {
+ 		// decrypt and write cleartext content:
+ 		let ciphertextChunkSize = contentCryptor.nonceLen + cleartextChunkSize + contentCryptor.tagLen
+ 		var chunkNumber: UInt64 = 0
+-		while ciphertextStream.hasBytesAvailable {
++		var eof = false
++		while ciphertextStream.hasBytesAvailable && !eof {
+ 			try autoreleasepool {
+ 				guard let ciphertextChunk = try ciphertextStream.read(maxLength: ciphertextChunkSize) else {
++					eof = true
+ 					return
+ 				}
+ 				let cleartextChunk = try decryptSingleChunk(ciphertextChunk, chunkNumber: chunkNumber, headerNonce: header.nonce, fileKey: header.contentKey)

@@ -1,0 +1,23 @@
+{
+  "pins" : [
+    {
+      "identity" : "base32",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/norio-nomura/Base32.git",
+      "state" : {
+        "revision" : "c4bc0a49689999ae2c7c778f3830a6a6e694efb8",
+        "version" : "0.9.0"
+      }
+    },
+    {
+      "identity" : "cryptolib-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/cryptomator/cryptolib-swift.git",
+      "state" : {
+        "revision" : "6e5dbea6e05742ad82a074bf7ee8c3305d92fbae",
+        "version" : "1.1.0"
+      }
+    }
+  ],
+  "version" : 2
+}
