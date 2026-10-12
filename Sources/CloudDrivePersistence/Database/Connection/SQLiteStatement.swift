@@ -27,6 +27,7 @@ public final class SQLiteStatement {
         let rc = sqlite3_prepare_v2(db, sql, -1, &statement, nil)
         guard rc == SQLITE_OK, let s = statement else {
             let msg = String(cString: sqlite3_errmsg(db))
+            if let statement { sqlite3_finalize(statement) }
             throw DatabaseError.prepareFailed(sql: sql, code: rc, message: msg)
         }
         self.stmt = s
@@ -49,7 +50,11 @@ public final class SQLiteStatement {
     
     public func bindText(_ text: String, at index: Int32) {
         guard let s = stmt else { return }
-        _ = text.withCString { sqlite3_bind_text(s, index, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+        let bytes = text.utf8CString
+        guard bytes.count - 1 <= Int(Int32.max) else { return }
+        _ = bytes.withUnsafeBufferPointer {
+            sqlite3_bind_text(s, index, $0.baseAddress, Int32(bytes.count - 1), unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        }
     }
     
     public func bindInt64(_ value: Int64, at index: Int32) {
@@ -102,13 +107,13 @@ public final class SQLiteStatement {
     
     public func columnText(at index: Int32) -> String {
         guard let s = stmt, let text = sqlite3_column_text(s, index) else { return "" }
-        return String(cString: text)
+        return String(decoding: UnsafeBufferPointer(start: text, count: Int(sqlite3_column_bytes(s, index))), as: UTF8.self)
     }
     
     public func columnOptionalText(at index: Int32) -> String? {
         guard let s = stmt, sqlite3_column_type(s, index) != SQLITE_NULL,
               let text = sqlite3_column_text(s, index) else { return nil }
-        return String(cString: text)
+        return String(decoding: UnsafeBufferPointer(start: text, count: Int(sqlite3_column_bytes(s, index))), as: UTF8.self)
     }
     
     public func columnInt64(at index: Int32) -> Int64 {

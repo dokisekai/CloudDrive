@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import Darwin
 import CloudDriveContracts
 import CloudDriveSupport
 import CloudDrivePersistence
@@ -27,6 +28,7 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
     public let cryptomatorFormat: CryptomatorFormat
     public let database: VFSDatabase
     public let storageClient: StorageClient
+    public var storageCapabilities: StorageCapabilities { storageClient.capabilities }
     private let syncManager: SyncManager
     private let cacheManager: CacheManager
     private let operationManager: FileOperationTracker
@@ -86,6 +88,14 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
                 fileRecord = try? database.getFile(id: String(id.dropFirst()))
             }
             if let file = fileRecord {
+                let isCached = cacheManager.isCached(fileId: file.id)
+                let meta = syncManager.getMetadata(fileId: file.id)
+                let effectiveStatus: SyncStatus
+                if let meta = meta {
+                    effectiveStatus = meta.syncStatus
+                } else {
+                    effectiveStatus = .cloudOnly
+                }
                 return VirtualFileItem(
                     id: file.id,
                     name: file.name,
@@ -93,9 +103,10 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
                     size: file.size,
                     modifiedAt: file.modifiedAt,
                     parentId: file.parentId,
-                    syncStatus: syncManager.getMetadata(fileId: file.id)?.syncStatus ?? .synced,
+                    syncStatus: effectiveStatus,
+                    localPath: isCached ? cacheManager.localPath(for: file.id).path : meta?.localPath,
                     remotePath: file.remotePath.isEmpty ? file.id : file.remotePath,
-                    etag: syncManager.getMetadata(fileId: file.id)?.etag
+                    etag: meta?.etag
                 )
             }
         } catch {
@@ -158,43 +169,44 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
             DirectoryThumbnailCatalogManager.shared.removeThumbnail(directoryId: directoryId, fileId: delId)
         }
         
-        for item in items {
-            if let meta = syncManager.getMetadata(fileId: item.id), meta.syncStatus == .pendingDelete {
-                continue
-            }
-            if syncManager.getMetadata(fileId: item.id)?.syncStatus.protectsLocalChanges == true {
-                // Keep local content/size and its edit baseline until the pending change resolves.
-                var metadata = syncManager.getMetadata(fileId: item.id)!
-                metadata.remoteModifiedAt = item.modifiedAt
-                syncManager.updateMetadata(metadata)
-            } else {
-                try insertItemIntoDatabase(item)
-                if let existingMeta = syncManager.getMetadata(fileId: item.id) {
-                    if existingMeta.syncStatus == .synced && (existingMeta.etag != item.etag || existingMeta.remoteModifiedAt != item.modifiedAt) {
-                        var updated = existingMeta
-                        updated.etag = item.etag
-                        updated.remoteModifiedAt = item.modifiedAt
-                        syncManager.updateMetadata(updated)
+        try syncManager.withJournalCommit {
+            var metadataToBatch: [FileMetadata] = []
+            try database.connection.withTransaction {
+                for item in items {
+                    let previous = try syncManager.getMetadataPersistent(fileId: item.id)
+                    if previous?.syncStatus == .pendingDelete { continue }
+                    if var protected = previous, protected.syncStatus.protectsLocalChanges {
+                        protected.remoteModifiedAt = item.modifiedAt
+                        protected.remoteETag = item.etag
+                        metadataToBatch.append(protected)
+                        continue
                     }
-                } else {
-                    syncManager.updateMetadata(FileMetadata(
-                        fileId: item.id,
-                        name: item.name,
-                        parentId: item.parentId,
-                        isDirectory: item.isDirectory,
-                        syncStatus: .synced,
-                        remotePath: item.remotePath,
-                        size: item.size,
-                        localModifiedAt: item.modifiedAt,
-                        remoteModifiedAt: item.modifiedAt,
-                        etag: item.etag,
-                        downloadProgress: 1.0,
-                        lastSyncTime: Date()
-                    ))
+                    if item.isDirectory {
+                        try database.insertDirectory(id: item.id, name: item.name, parentId: item.parentId, encryptedId: item.id, remotePath: item.remotePath ?? "", modifiedAt: item.modifiedAt)
+                    } else {
+                        try database.insertFile(id: item.id, name: item.name, parentId: item.parentId, size: item.size, encryptedName: item.name, remotePath: item.remotePath ?? "", modifiedAt: item.modifiedAt)
+                    }
+                    let isCached = !item.isDirectory && cacheManager.isCached(fileId: item.id)
+                    var metadata = previous ?? FileMetadata(fileId: item.id, name: item.name, parentId: item.parentId,
+                        isDirectory: item.isDirectory, syncStatus: item.isDirectory ? .synced : .cloudOnly,
+                        remotePath: item.remotePath, size: item.size, remoteModifiedAt: item.modifiedAt, remoteETag: item.etag)
+                    metadata.remotePath = item.remotePath
+                    metadata.remoteModifiedAt = item.modifiedAt
+                    metadata.remoteETag = item.etag
+                    if !item.isDirectory {
+                        let etagMismatched = metadata.etag != nil && item.etag != nil && metadata.etag != item.etag
+                        let confirmed = isCached && !etagMismatched
+                        metadata.syncStatus = confirmed ? .synced : .cloudOnly
+                        metadata.downloadProgress = confirmed ? 1 : 0
+                        if confirmed { metadata.localPath = cacheManager.localPath(for: item.id).path }
+                        if !isCached { metadata.size = item.size }
+                    }
+                    metadataToBatch.append(metadata)
                 }
             }
+            if !metadataToBatch.isEmpty { try syncManager.updateMetadataBatchPersistent(metadataToBatch) }
         }
-        
+
         directoryCacheLock.lock()
         directoryCacheTimestamps[directoryId] = Date()
         directoryCacheLock.unlock()
@@ -203,10 +215,12 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
             if let meta = syncManager.getMetadata(fileId: item.id), meta.syncStatus == .pendingDelete {
                 return nil
             }
-            guard let metadata = syncManager.getMetadata(fileId: item.id), metadata.syncStatus.protectsLocalChanges else { return item }
             var localItem = previousItems.first(where: { $0.id == item.id }) ?? item
-            localItem.syncStatus = metadata.syncStatus
-            localItem.etag = metadata.etag
+            if let metadata = syncManager.getMetadata(fileId: item.id) {
+                localItem.syncStatus = metadata.syncStatus
+                localItem.etag = metadata.etag
+                localItem.localPath = metadata.localPath
+            }
             return localItem
         }
         for prev in previousItems {
@@ -246,21 +260,29 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
     }
 
     public func uploadFile(localURL: URL, name: String, parentId: String, expectedETag: String?) async throws -> VirtualFileItem {
+        try await uploadFile(localURL: localURL, name: name, parentId: parentId, expectedETag: expectedETag, progress: nil)
+    }
+
+    public func uploadFile(localURL: URL, name: String, parentId: String, expectedETag: String?, progress: ((Double) -> Void)?) async throws -> VirtualFileItem {
+        let parentDirId = cryptomatorFormat.dirIdData(from: parentId)
         let mode: StorageWriteMode
         if let etag = expectedETag {
             mode = .replace(expectedETag: etag)
         } else {
-            let existsLocally = (try? database.listChildren(parentId: parentId))?.contains(where: { $0.name == name }) ?? false
-            mode = existsLocally ? .forceOverwrite : .createIfAbsent
+            mode = .createIfAbsent
         }
-        return try await uploadFile(localURL: localURL, name: name, parentId: parentId, mode: mode)
+        return try await uploadFile(localURL: localURL, name: name, parentId: parentId, mode: mode, progress: progress)
     }
 
     public func uploadFile(localURL: URL, name: String, parentId: String, mode: StorageWriteMode) async throws -> VirtualFileItem {
+        try await uploadFile(localURL: localURL, name: name, parentId: parentId, mode: mode, progress: nil)
+    }
+
+    public func uploadFile(localURL: URL, name: String, parentId: String, mode: StorageWriteMode, progress: ((Double) -> Void)?) async throws -> VirtualFileItem {
         let parentDirId = cryptomatorFormat.dirIdData(from: parentId)
         let item: VirtualFileItem
         do {
-            item = try await cryptomatorFormat.uploadFile(localURL: localURL, name: name, parentDirId: parentDirId, mode: mode)
+            item = try await cryptomatorFormat.uploadFile(localURL: localURL, name: name, parentDirId: parentDirId, mode: mode, progress: progress)
         } catch {
             if (error as? StorageError)?.isPreconditionFailure == true {
                 let (fileC9rPath, _, encName, _) = (try? cryptomatorFormat.getFileRemotePath(name: name, parentDirId: parentDirId)) ?? ("", false, "", nil)
@@ -306,6 +328,10 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
     // MARK: - 下载
     
     public func downloadFile(fileId: String, to destinationURL: URL, progress: ((Double) -> Void)? = nil) async throws {
+        _ = try await downloadFile(fileId: fileId, to: destinationURL, expectedETag: nil, progress: progress)
+    }
+
+    public func downloadFile(fileId: String, to destinationURL: URL, expectedETag: String?, progress: ((Double) -> Void)? = nil) async throws -> String? {
         var file = try? database.getFile(id: fileId)
         if file == nil && !fileId.hasPrefix("file_") {
             file = try? database.getFile(id: "file_\(fileId)")
@@ -313,16 +339,48 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
         guard let file = file else {
             throw VFSError.fileNotFound
         }
-        let deliveredETag = try await cryptomatorFormat.downloadFile(remotePath: file.remotePath, to: destinationURL, progress: progress)
-        var metadata = syncManager.getMetadata(fileId: file.id) ?? FileMetadata(fileId: file.id, name: file.name, parentId: file.parentId, isDirectory: false, syncStatus: .synced)
-        if !metadata.syncStatus.protectsLocalChanges {
-            metadata.etag = deliveredETag
-            metadata.remotePath = file.remotePath
-            metadata.localPath = destinationURL.path
-            metadata.syncStatus = .synced
-            metadata.lastSyncTime = Date()
-            syncManager.updateMetadata(metadata)
+        try FileManager.default.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let temporary = destinationURL.deletingLastPathComponent().appendingPathComponent("download-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let deliveredETag = try await cryptomatorFormat.downloadFile(remotePath: file.remotePath, to: temporary, expectedETag: expectedETag, progress: progress)
+        try syncManager.withJournalCommit {
+            var metadata = try syncManager.getMetadataPersistent(fileId: file.id) ?? FileMetadata(fileId: file.id, name: file.name, parentId: file.parentId, isDirectory: false, syncStatus: .synced)
+            let pending = try syncManager.queue.itemsForFilePersistent(fileId: file.id)
+            let protectsEdit = metadata.syncStatus.protectsLocalChanges || !pending.isEmpty
+            if protectsEdit && (metadata.localPath == destinationURL.path || cacheManager.localPath(for: file.id).standardizedFileURL == destinationURL.standardizedFileURL) {
+                throw SyncError.operationFailed("A newer local edit arrived during download")
+            }
+            guard rename(temporary.path, destinationURL.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            if !protectsEdit {
+                metadata.etag = deliveredETag
+                metadata.remotePath = file.remotePath
+                metadata.syncStatus = .synced
+                metadata.localPath = destinationURL.path
+                metadata.lastSyncTime = Date()
+                try syncManager.updateMetadataPersistent(metadata)
+            }
         }
+        return deliveredETag
+    }
+
+    public func readRange(fileId: String, range: ClosedRange<Int64>) async throws -> Data {
+        try await readRange(fileId: fileId, range: range, expectedETag: nil)
+    }
+
+    public func readRange(fileId: String, range: ClosedRange<Int64>, expectedETag: String?) async throws -> Data {
+        var file = try? database.getFile(id: fileId)
+        if file == nil && !fileId.hasPrefix("file_") {
+            file = try? database.getFile(id: "file_\(fileId)")
+        }
+        guard let file = file else {
+            throw VFSError.fileNotFound
+        }
+        let totalCipherSize = CryptomatorRandomAccess.calculateCiphertextSize(cleartextSize: file.size)
+        return try await cryptomatorFormat.readCleartextRange(
+            remotePath: file.remotePath,
+            cleartextRange: range,
+            totalCiphertextSize: totalCipherSize, expectedETag: expectedETag
+        )
     }
     
     // MARK: - 删除
@@ -345,7 +403,11 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
         }
         
         let dirIdData = isDir ? cryptomatorFormat.dirIdData(from: itemId) : nil
-        try await cryptomatorFormat.deleteItem(remotePath: remotePath, dirIdData: dirIdData)
+        let deletionMetadata = try syncManager.getMetadataPersistent(fileId: itemId)
+        if deletionMetadata?.syncStatus != .localOnly {
+            let revision = isDir ? StorageContentVerification.collectionDeletionETag(deletionMetadata?.remoteETag ?? deletionMetadata?.etag) : try StorageContentVerification.mutationETag(deletionMetadata?.remoteETag ?? deletionMetadata?.etag, required: storageClient.requiresETagForUpdate)
+            try await cryptomatorFormat.deleteItem(remotePath: remotePath, dirIdData: dirIdData, expectedETag: revision)
+        }
         if isDir {
             let childFileIds = database.getAllDescendantFileIds(directoryId: itemId)
             for childId in childFileIds {
@@ -378,52 +440,51 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
             let (newRemotePath, isShortened, newEncName, shortenedDirPath) = try cryptomatorFormat.getFileRemotePath(name: finalName, parentDirId: newParentDirId)
             let newFileId = "file_\(newEncName)"
             
+            if newRemotePath == file.remotePath {
+                guard let unchanged = try getItem(id: file.id) else { throw VFSError.itemNotFound }
+                return unchanged
+            }
             var queuedMove = false
-            let isPending = syncManager.hasPendingUpload(fileId: file.id) || file.id.hasPrefix("pending_") || (syncManager.getMetadata(fileId: file.id)?.syncStatus == .pendingUpload)
-            if isPending {
+            var movedRevision: String? = nil
+            let oldMeta = try syncManager.getMetadataPersistent(fileId: file.id)
+            let isLocalOnly = (oldMeta?.syncStatus == .localOnly) || finalName.hasSuffix(".nosync")
+            let isPending = syncManager.hasPendingUpload(fileId: file.id) || file.id.hasPrefix("pending_") || (oldMeta?.syncStatus == .pendingUpload)
+            if isLocalOnly {
+                Logger.shared.info(.sync, "EncryptedVFS moveItem: Item is localOnly / .nosync, skipping remote storageClient.move")
+            } else if isPending {
                 syncManager.updatePendingOperation(oldFileId: file.id, newFileId: newFileId, newRemotePath: newRemotePath, newName: finalName, newParentId: newParentId, sourceRemotePath: file.remotePath)
             } else {
                 do {
-                    let oldSourcePath: String
-                    if file.remotePath.hasSuffix("/contents.c9r") && file.remotePath.contains(".c9s/") {
-                        oldSourcePath = (file.remotePath as NSString).deletingLastPathComponent
-                    } else {
-                        oldSourcePath = file.remotePath
-                    }
+                    let revision = try StorageContentVerification.mutationETag(oldMeta?.remoteETag ?? oldMeta?.etag, required: storageClient.requiresETagForUpdate)
                     
                     if isShortened, let sDir = shortenedDirPath {
                         if (try? await storageClient.exists(path: sDir)) != true {
                             try await storageClient.createDirectory(path: sDir)
                         }
                         let tempNameURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                        defer { try? FileManager.default.removeItem(at: tempNameURL) }
                         if let encData = newEncName.data(using: .utf8) {
                             try encData.write(to: tempNameURL)
-                            try await storageClient.uploadFile(localURL: tempNameURL, to: "\(sDir)/name.c9s") { _ in }
+                            _ = try await storageClient.uploadFile(localURL: tempNameURL, to: "\(sDir)/name.c9s", mode: .createIfAbsent) { _ in }
                             try? FileManager.default.removeItem(at: tempNameURL)
                         }
-                        try await storageClient.move(from: file.remotePath, to: newRemotePath)
-                        if oldSourcePath != file.remotePath {
-                            try? await storageClient.delete(path: oldSourcePath)
-                        }
+                        movedRevision = try await storageClient.moveWithRevision(from: file.remotePath, to: newRemotePath, expectedETag: revision)
                     } else {
                         let newParentDirPath = try cryptomatorFormat.getDirPath(dirId: newParentDirId)
                         if (try? await storageClient.exists(path: newParentDirPath)) != true {
                             try await storageClient.createDirectory(path: newParentDirPath)
                         }
-                        try await storageClient.move(from: file.remotePath, to: newRemotePath)
-                        if oldSourcePath != file.remotePath {
-                            try? await storageClient.delete(path: oldSourcePath)
-                        }
+                        movedRevision = try await storageClient.moveWithRevision(from: file.remotePath, to: newRemotePath, expectedETag: revision)
                     }
                 } catch {
                     guard VFSOperationErrorPolicy.permitsOfflineRetry(error) else { throw error }
-                    try syncManager.enqueuePersistent(.move(itemId: newFileId, sourceRemotePath: file.remotePath, targetRemotePath: newRemotePath), startProcessing: false)
+                    try syncManager.enqueuePersistent(.move(itemId: newFileId, sourceRemotePath: file.remotePath, targetRemotePath: newRemotePath), startProcessing: false, expectedETag: oldMeta?.remoteETag ?? oldMeta?.etag)
                     queuedMove = true
                 }
             }
             
             try? database.deleteFile(id: file.id)
-            try? database.insertFile(
+            try database.insertFile(
                 id: newFileId,
                 name: finalName,
                 parentId: newParentId,
@@ -431,14 +492,14 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
                 encryptedName: finalName,
                 remotePath: newRemotePath
             )
+            ItemAliasStore.shared.recordAlias(from: file.id, to: newFileId)
             
             let wasCached = cacheManager.isCached(fileId: file.id)
             if wasCached {
                 try? cacheManager.moveCache(from: file.id, to: newFileId)
             }
             
-            let oldMeta = syncManager.getMetadata(fileId: file.id)
-            let targetSyncStatus: SyncStatus = queuedMove ? .pendingMove : (isPending ? .pendingUpload : (wasCached ? .synced : (oldMeta?.syncStatus ?? .cloudOnly)))
+            let targetSyncStatus: SyncStatus = isLocalOnly ? .localOnly : (queuedMove ? .pendingMove : (isPending ? .pendingUpload : (wasCached ? .synced : (oldMeta?.syncStatus ?? .cloudOnly))))
             syncManager.moveMetadata(
                 from: file.id,
                 to: newFileId,
@@ -447,6 +508,17 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
                 newRemotePath: newRemotePath,
                 fallbackStatus: targetSyncStatus
             )
+                if var metadata = try syncManager.getMetadataPersistent(fileId: newFileId) {
+                    let oldCachePath = cacheManager.localPath(for: file.id).path
+                    if metadata.localPath == oldCachePath && cacheManager.isCached(fileId: newFileId) {
+                        metadata.localPath = cacheManager.localPath(for: newFileId).path
+                    }
+                    if let tag = try? StorageContentVerification.mutationETag(movedRevision, required: true) {
+                        metadata.remoteETag = tag
+                        if oldMeta?.syncStatus == .synced && oldMeta?.etag == (oldMeta?.remoteETag ?? oldMeta?.etag) { metadata.etag = tag }
+                    }
+                    try syncManager.updateMetadataPersistent(metadata)
+                }
             if queuedMove { syncManager.processSyncQueue() }
             
             return VirtualFileItem(
@@ -460,6 +532,9 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
                 remotePath: newRemotePath
             )
         } else if let dir = try? database.getDirectory(id: itemId) {
+            if storageClient.requiresETagForUpdate {
+                throw StorageError.serverError(statusCode: 412, message: "Encrypted directory moves require a version-bound pointer transaction")
+            }
             let finalName = newName ?? dir.name
             let newParentDirId = cryptomatorFormat.dirIdData(from: newParentId)
             let (newRemotePath, isShortened, newEncName, shortenedDirPath) = try cryptomatorFormat.getDirectoryRemotePath(name: finalName, parentDirId: newParentDirId)
@@ -485,6 +560,10 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
                     try? await storageClient.delete(path: dir.remotePath)
                 } else {
                     try await storageClient.move(from: dir.remotePath, to: newRemotePath)
+                }
+                if newParentId != dir.parentId {
+                    let dirIdData = cryptomatorFormat.dirIdData(from: dir.id)
+                    await cryptomatorFormat.updateDirectoryParentId(dirIdData: dirIdData, newParentDirId: newParentDirId)
                 }
             } catch {
                 guard VFSOperationErrorPolicy.permitsOfflineRetry(error) else { throw error }
@@ -533,6 +612,12 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
     // MARK: - 复制
     
     public func copyItem(itemId: String, newParentId: String, newName: String? = nil) async throws -> VirtualFileItem {
+        try await copyItemInternal(itemId: itemId, newParentId: newParentId, newName: newName, cachedContentOverride: nil, expectedSourceETag: nil)
+    }
+    public func copyItem(itemId: String, newParentId: String, newName: String?, cachedContentOverride: String, expectedSourceETag: String) async throws -> VirtualFileItem {
+        try await copyItemInternal(itemId: itemId, newParentId: newParentId, newName: newName, cachedContentOverride: cachedContentOverride, expectedSourceETag: expectedSourceETag)
+    }
+    private func copyItemInternal(itemId: String, newParentId: String, newName: String?, cachedContentOverride: String?, expectedSourceETag: String?) async throws -> VirtualFileItem {
         var fileRecord = try? database.getFile(id: itemId)
         if fileRecord == nil && !itemId.hasPrefix("file_") {
             fileRecord = try? database.getFile(id: "file_\(itemId)")
@@ -543,55 +628,111 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
             let newParentDirId = cryptomatorFormat.dirIdData(from: newParentId)
             let (newRemotePath, isShortened, newEncName, shortenedDirPath) = try cryptomatorFormat.getFileRemotePath(name: finalName, parentDirId: newParentDirId)
             let newFileId = "file_\(newEncName)"
+            guard newRemotePath != file.remotePath else { throw StorageError.serverError(statusCode: 400, message: "Cannot copy an item onto itself") }
+            let sourceMetadata = try syncManager.getMetadataPersistent(fileId: file.id)
+            if let expectedSourceETag {
+                guard sourceMetadata?.syncStatus == .synced,
+                      sourceMetadata?.etag == expectedSourceETag,
+                      (sourceMetadata?.remoteETag ?? sourceMetadata?.etag) == expectedSourceETag,
+                      !syncManager.hasPendingOperation(fileId: file.id) else {
+                    throw StorageError.serverError(statusCode: 412, message: "Cached COPY source revision changed")
+                }
+            }
+            if sourceMetadata?.syncStatus.protectsLocalChanges == true || syncManager.hasPendingOperation(fileId: file.id) {
+                let local = try VFSLocalCopy.prepare(sourceId: file.id, targetId: newFileId, name: finalName, parentId: newParentId,
+                    remotePath: newRemotePath, encrypted: true, vaultId: vaultId, sync: syncManager, cache: cacheManager)
+                try database.insertFile(id: local.id, name: finalName, parentId: newParentId, size: local.size, encryptedName: finalName, remotePath: newRemotePath)
+                return local
+            }
+            let revision = try StorageContentVerification.mutationETag(sourceMetadata?.remoteETag ?? sourceMetadata?.etag, required: storageClient.requiresETagForUpdate)
+            try syncManager.withJournalCommit {
+                guard try syncManager.getMetadataPersistent(fileId: newFileId) == nil,
+                      !syncManager.hasPendingOperation(fileId: newFileId),
+                      !cacheManager.isCached(fileId: newFileId) else {
+                    throw StorageError.serverError(statusCode: 412, message: "COPY destination has local state")
+                }
+            }
             try await storageClient.createDirectory(path: cryptomatorFormat.getDirPath(dirId: newParentDirId))
             if isShortened, let directory = shortenedDirPath {
                 try await storageClient.createDirectory(path: directory)
                 let nameURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
                 defer { try? FileManager.default.removeItem(at: nameURL) }
                 try Data(newEncName.utf8).write(to: nameURL)
-                try await storageClient.uploadFile(localURL: nameURL, to: directory + "/name.c9s") { _ in }
+                _ = try await storageClient.uploadFile(localURL: nameURL, to: directory + "/name.c9s", mode: .createIfAbsent) { _ in }
             }
-            try await storageClient.copy(from: file.remotePath, to: newRemotePath)
+            let returnedETag = try await storageClient.copy(from: file.remotePath, to: newRemotePath, expectedETag: revision)
+            let committedETag = try? StorageContentVerification.mutationETag(returnedETag, required: true)
             
-            try? database.insertFile(
-                id: newFileId,
-                name: finalName,
-                parentId: newParentId,
-                size: file.size,
-                encryptedName: finalName,
-                remotePath: newRemotePath
-            )
-            
-            let wasCached = cacheManager.isCached(fileId: file.id)
-            if wasCached {
-                try? cacheManager.cloneCache(from: file.id, to: newFileId)
+            return try syncManager.withJournalCommit {
+                guard try syncManager.getMetadataPersistent(fileId: newFileId) == nil,
+                      !syncManager.hasPendingOperation(fileId: newFileId),
+                          !cacheManager.isCached(fileId: newFileId) else {
+                    throw StorageError.serverError(statusCode: 412, message: "COPY destination changed during the request")
+                }
+                let currentSource = try syncManager.getMetadataPersistent(fileId: file.id)
+                let sourceUnchanged = currentSource?.syncStatus == sourceMetadata?.syncStatus
+                    && currentSource?.etag == sourceMetadata?.etag && currentSource?.remoteETag == sourceMetadata?.remoteETag
+                    && currentSource?.localModifiedAt == sourceMetadata?.localModifiedAt && currentSource?.localPath == sourceMetadata?.localPath
+                    && !syncManager.hasPendingOperation(fileId: file.id)
+                try database.insertFile(
+                    id: newFileId,
+                    name: finalName,
+                    parentId: newParentId,
+                    size: file.size,
+                    encryptedName: finalName,
+                    remotePath: newRemotePath
+                )
+                
+                let wasCached = (cachedContentOverride != nil || sourceUnchanged) && committedETag != nil && sourceMetadata?.syncStatus == .synced && (cachedContentOverride != nil || sourceMetadata?.lastSyncTime != nil) && sourceMetadata?.etag == revision && cacheManager.isCached(fileId: cachedContentOverride ?? file.id)
+                var cacheCloned = false
+                if wasCached {
+                    do {
+                        try cacheManager.cloneCache(from: cachedContentOverride ?? file.id, to: newFileId, confirmedETag: committedETag)
+                        cacheCloned = true
+                    } catch { cacheCloned = false }
+                }
+                let targetSyncStatus: SyncStatus = cacheCloned ? .synced : .cloudOnly
+                try syncManager.updateMetadataPersistent(FileMetadata(
+                    fileId: newFileId,
+                    name: finalName,
+                    parentId: newParentId,
+                    isDirectory: false,
+                    syncStatus: targetSyncStatus,
+                    localPath: cacheCloned ? cacheManager.localPath(for: newFileId).path : nil,
+                    remotePath: newRemotePath,
+                    size: file.size,
+                    localModifiedAt: Date(),
+                    remoteModifiedAt: Date(), etag: committedETag, remoteETag: committedETag,
+                    downloadProgress: cacheCloned ? 1 : 0, lastSyncTime: cacheCloned ? Date() : nil
+                ))
+                
+                return VirtualFileItem(
+                    id: newFileId,
+                    name: finalName,
+                    isDirectory: false,
+                    size: file.size,
+                    modifiedAt: Date(),
+                    parentId: newParentId,
+                    syncStatus: targetSyncStatus,
+                    remotePath: newRemotePath
+                )
             }
-            
-            let targetSyncStatus: SyncStatus = wasCached ? .synced : .cloudOnly
-            syncManager.updateMetadata(FileMetadata(
-                fileId: newFileId,
-                name: finalName,
-                parentId: newParentId,
-                isDirectory: false,
-                syncStatus: targetSyncStatus,
-                localPath: wasCached ? cacheManager.localPath(for: newFileId).path : nil,
-                remotePath: newRemotePath,
-                size: file.size,
-                localModifiedAt: Date(),
-                remoteModifiedAt: Date()
-            ))
-            
-            return VirtualFileItem(
-                id: newFileId,
-                name: finalName,
-                isDirectory: false,
-                size: file.size,
-                modifiedAt: Date(),
-                parentId: newParentId,
-                syncStatus: targetSyncStatus,
-                remotePath: newRemotePath
-            )
         } else if let dir = try? database.getDirectory(id: itemId) {
+            var ancestor = newParentId
+            var visited = Set<String>()
+            while visited.insert(ancestor).inserted {
+                guard ancestor != itemId else { throw StorageError.serverError(statusCode: 400, message: "Cannot copy a directory into itself") }
+                guard let parent = try database.getDirectory(id: ancestor), let nextParent = parent.parentId, nextParent != ancestor else { break }
+                ancestor = nextParent
+            }
+            for id in [itemId] + database.getAllDescendantFileIds(directoryId: itemId) {
+                if (try syncManager.getMetadataPersistent(fileId: id))?.syncStatus.protectsLocalChanges == true || syncManager.hasPendingOperation(fileId: id) {
+                    throw StorageError.notSupported("Synchronize pending directory edits before copying the directory")
+                }
+            }
+            // Snapshot before creating the destination so enumeration cannot recurse
+            // into a newly created child of the source.
+            let children = try await listDirectoryFromRemoteAsync(directoryId: itemId)
             let finalName = newName ?? dir.name
             let newParentDirId = cryptomatorFormat.dirIdData(from: newParentId)
             let newDirItem = try await cryptomatorFormat.createDirectory(name: finalName, parentDirId: newParentDirId)
@@ -615,7 +756,6 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
                 remoteModifiedAt: Date()
             ))
             
-            let children = try await listDirectoryFromRemoteAsync(directoryId: itemId)
             for child in children {
                 _ = try await copyItem(itemId: child.id, newParentId: newDirItem.id, newName: child.name)
             }
@@ -652,7 +792,7 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
             if storageClient.requiresETagForUpdate && metadata.etag == nil {
                 throw StorageError.notSupported("Download the current revision before replacing a WebDAV file without a saved ETag")
             }
-            let item = try await cryptomatorFormat.uploadFile(localURL: cacheManager.localPath(for: file.id), name: file.name, parentDirId: cryptomatorFormat.dirIdData(from: file.parentId), expectedETag: metadata.etag)
+            let item = try await cryptomatorFormat.uploadFile(localURL: cacheManager.localPath(for: file.id), name: file.name, parentDirId: cryptomatorFormat.dirIdData(from: file.parentId), mode: metadata.etag.map { .replace(expectedETag: $0) } ?? .createIfAbsent)
             try insertItemIntoDatabase(item)
             metadata.etag = item.etag
             metadata.remoteModifiedAt = item.modifiedAt
@@ -680,18 +820,40 @@ public final class EncryptedVFSProvider: VFSProvider, @unchecked Sendable {
     }
     
     private func insertItemIntoDatabase(_ item: VirtualFileItem) throws {
-            if item.isDirectory {
-                try database.insertDirectory(id: item.id, name: item.name, parentId: item.parentId, encryptedId: item.id, remotePath: item.remotePath ?? "", modifiedAt: item.modifiedAt)
-            } else {
-                try database.insertFile(id: item.id, name: item.name, parentId: item.parentId, size: item.size, encryptedName: item.name, remotePath: item.remotePath ?? "", modifiedAt: item.modifiedAt)
+        if item.isDirectory {
+            try database.insertDirectory(id: item.id, name: item.name, parentId: item.parentId, encryptedId: item.id, remotePath: item.remotePath ?? "", modifiedAt: item.modifiedAt)
+        } else {
+            try database.insertFile(id: item.id, name: item.name, parentId: item.parentId, size: item.size, encryptedName: item.name, remotePath: item.remotePath ?? "", modifiedAt: item.modifiedAt)
+        }
+        let isCached = !item.isDirectory && cacheManager.isCached(fileId: item.id)
+        var metadata = syncManager.getMetadata(fileId: item.id) ?? FileMetadata(
+            fileId: item.id,
+            name: item.name,
+            parentId: item.parentId,
+            isDirectory: item.isDirectory,
+            syncStatus: (item.isDirectory || isCached) ? .synced : .cloudOnly,
+            localPath: isCached ? cacheManager.localPath(for: item.id).path : nil,
+            remotePath: item.remotePath,
+            size: item.size,
+            localModifiedAt: item.modifiedAt,
+            remoteModifiedAt: item.modifiedAt,
+            etag: item.etag,
+            downloadProgress: (item.isDirectory || isCached) ? 1.0 : 0.0,
+            lastSyncTime: isCached ? Date() : nil
+        )
+        metadata.remotePath = item.remotePath
+        metadata.remoteModifiedAt = item.modifiedAt
+        if isCached && metadata.syncStatus == .cloudOnly {
+            metadata.syncStatus = .synced
+            metadata.downloadProgress = 1.0
+            if metadata.localPath == nil {
+                metadata.localPath = cacheManager.localPath(for: item.id).path
             }
-            var metadata = syncManager.getMetadata(fileId: item.id) ?? FileMetadata(fileId: item.id, name: item.name, parentId: item.parentId, isDirectory: item.isDirectory, syncStatus: item.isDirectory ? .synced : .cloudOnly)
-            metadata.remotePath = item.remotePath
-            metadata.remoteModifiedAt = item.modifiedAt
-            if !cacheManager.isCached(fileId: item.id) && !metadata.syncStatus.protectsLocalChanges {
-                metadata.etag = item.etag
-                metadata.size = item.size
-            }
-            syncManager.updateMetadata(metadata)
+        }
+        if !isCached && !metadata.syncStatus.protectsLocalChanges {
+            metadata.etag = item.etag
+            metadata.size = item.size
+        }
+        syncManager.updateMetadata(metadata)
     }
 }

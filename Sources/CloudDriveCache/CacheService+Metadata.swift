@@ -30,4 +30,12 @@ extension CacheService {
     public func getCacheStatistics() -> (totalSize: Int64, fileCount: Int) {
         metadataStore.getStatistics()
     }
+
+    public func getDynamicCacheStatistics() -> (totalSize: Int64, fileCount: Int) {
+        metadataStore.getDynamicStatistics()
+    }
+
+    public func getPinnedCacheStatistics() -> (totalSize: Int64, fileCount: Int) {
+        metadataStore.getPinnedStatistics()
+    }
 }

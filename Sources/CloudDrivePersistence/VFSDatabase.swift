@@ -206,22 +206,6 @@ public class VFSDatabase {
     
     // MARK: - Vault Settings (加密库专属配置)
     
-    /// 获取当前加密库是否开启回收站（默认关闭 false）
-    public func isRecycleBinEnabled() -> Bool {
-        do {
-            try open()
-            return try vaultSettingsRepo.isRecycleBinEnabled()
-        } catch {
-            return false // 默认关闭
-        }
-    }
-    
-    /// 设置当前加密库是否开启回收站
-    public func setRecycleBinEnabled(_ enabled: Bool) throws {
-        try open()
-        try vaultSettingsRepo.setRecycleBinEnabled(enabled)
-    }
-    
     /// 获取当前加密库持久化的忽略规则内容
     public func getIgnoreRules() -> String? {
         do {

@@ -8,11 +8,14 @@ extension OfflineSyncQueue {
         try checkMigrationIfNeeded()
         return try conn.withTransaction {
             let now = Date().timeIntervalSince1970
-            let updateSQL = "UPDATE sync_queue SET started_at = ? WHERE id = ?;"
+            let updateSQL = "UPDATE sync_queue SET started_at = ? WHERE id = ? AND started_at IS NULL AND dependency_count = 0 AND COALESCE(blocked_by_conflict, 0) = 0 AND COALESCE(is_auth_failure, 0) = 0 AND COALESCE(is_permanent_failure, 0) = 0 AND (next_attempt_at IS NULL OR next_attempt_at <= ?);"
             let updateStmt = try SQLiteStatement(db: try conn.getHandle(), sql: updateSQL)
             updateStmt.bindDouble(now, at: 1)
             updateStmt.bindText(id, at: 2)
-            guard updateStmt.step() == SQLITE_DONE else { return nil }
+            updateStmt.bindDouble(now, at: 3)
+            let updateCode = updateStmt.step()
+            guard updateCode == SQLITE_DONE else { throw SyncError.operationFailed("Cannot claim sync operation (SQLite \(updateCode))") }
+            guard sqlite3_changes(try conn.getHandle()) == 1 else { return nil }
 
             let selectSQL = """
             SELECT id, vault_id, file_id, operation_json, retry_count, last_error,
@@ -22,10 +25,12 @@ extension OfflineSyncQueue {
             """
             let selectStmt = try SQLiteStatement(db: try conn.getHandle(), sql: selectSQL)
             selectStmt.bindText(id, at: 1)
-            if selectStmt.step() == SQLITE_ROW {
-                return parseItem(stmt: selectStmt)
+            let code = selectStmt.step()
+            if code == SQLITE_DONE { return nil }
+            guard code == SQLITE_ROW, let item = parseItem(stmt: selectStmt) else {
+                throw SyncError.operationFailed("Cannot read claimed sync operation (SQLite \(code))")
             }
-            return nil
+            return item
         }
     }
 
@@ -36,7 +41,8 @@ extension OfflineSyncQueue {
             let sql = "UPDATE sync_queue SET started_at = NULL WHERE started_at IS NOT NULL AND started_at < ?;"
             let stmt = try SQLiteStatement(db: try conn.getHandle(), sql: sql)
             stmt.bindDouble(threshold, at: 1)
-            _ = stmt.step()
+            let code = stmt.step()
+            guard code == SQLITE_DONE else { throw SyncError.operationFailed("Cannot persist sync lease state (SQLite \(code))") }
         }
     }
 
@@ -46,7 +52,22 @@ extension OfflineSyncQueue {
             let sql = "UPDATE sync_queue SET started_at = NULL WHERE id = ?;"
             let stmt = try SQLiteStatement(db: try conn.getHandle(), sql: sql)
             stmt.bindText(id, at: 1)
-            _ = stmt.step()
+            let code = stmt.step()
+            guard code == SQLITE_DONE else { throw SyncError.operationFailed("Cannot persist sync lease state (SQLite \(code))") }
+        }
+    }
+
+    /// 动态刷新长耗时任务的心跳时间，防止超大文件上传中途被误判为假死
+    public func touchStartedAt(id: String) throws {
+        try checkMigrationIfNeeded()
+        try conn.withTransaction {
+            let now = Date().timeIntervalSince1970
+            let sql = "UPDATE sync_queue SET started_at = ? WHERE id = ?;"
+            let stmt = try SQLiteStatement(db: try conn.getHandle(), sql: sql)
+            stmt.bindDouble(now, at: 1)
+            stmt.bindText(id, at: 2)
+            let code = stmt.step()
+            guard code == SQLITE_DONE else { throw SyncError.operationFailed("Cannot persist sync lease state (SQLite \(code))") }
         }
     }
 

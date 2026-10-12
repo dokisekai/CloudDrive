@@ -2,6 +2,7 @@ import Foundation
 import FileProvider
 import UniformTypeIdentifiers
 import CloudDriveCore
+import CloudDriveContracts
 
 extension FileProviderExtension {
     func fetchContents(for itemIdentifier: NSFileProviderItemIdentifier,
@@ -12,78 +13,105 @@ extension FileProviderExtension {
         let task = Task { [weak self] in
             guard let self else { completionHandler(nil, nil, NSFileProviderError(.noSuchItem)); return }
             let id = itemIdentifier.rawValue
+            var initialMetadata: FileMetadata?
+            var effectiveId = id
             do {
                 try Task.checkCancellation()
                 try await ensureVaultUnlocked()
-                cacheManager.beginAccess(fileId: id)
-                defer { cacheManager.endAccess(fileId: id) }
                 var item = try findItem(identifier: id)
-                let metadata = syncManager.getMetadata(fileId: id)
-                let dirty = metadata.map { $0.syncStatus != .synced && $0.syncStatus != .cloudOnly && $0.syncStatus != .downloading && $0.syncStatus != .partialDownload } ?? false
-                if let requestedVersion, requestedVersion.contentVersion != NSFileProviderItemVersion.beforeFirstSyncComponent,
-                   requestedVersion.contentVersion != makeItem(vfsItem: item, isEncrypted: vfs.isEncrypted).itemVersion.contentVersion {
-                    throw NSFileProviderError(.versionNoLongerAvailable)
+                effectiveId = item.id
+                cacheManager.beginAccess(fileId: effectiveId)
+                defer { cacheManager.endAccess(fileId: effectiveId) }
+                let cacheURL = cacheManager.localPath(for: effectiveId)
+                func completionItem(_ value: VirtualFileItem) -> FileProviderItem {
+                    if effectiveId == id { return self.makeItem(vfsItem: value, isEncrypted: self.vfs.isEncrypted) }
+                    return FileProviderItem(identifier: itemIdentifier, parentIdentifier: (value.parentId == "ROOT" || value.parentId == "/") ? .rootContainer : NSFileProviderItemIdentifier(value.parentId), filename: value.name, contentType: value.isDirectory ? .folder : .data, capabilities: [.allowsReading, .allowsWriting, .allowsDeleting, .allowsTrashing, .allowsRenaming, .allowsReparenting], documentSize: value.size, contentModificationDate: value.modifiedAt, creationDate: value.modifiedAt, isEncrypted: self.vfs.isEncrypted, remoteETag: value.etag, cacheManager: self.cacheManager, syncManager: self.syncManager)
                 }
-                let cacheURL = cacheManager.localPath(for: id)
-                var valid = cacheManager.isCached(fileId: id)
-                if valid && !dirty, let cached = cacheManager.getCacheMetadata(fileId: id) {
-                    if let remoteRevision = item.etag, let baselineRevision = metadata?.etag { valid = remoteRevision == baselineRevision }
-                    else { valid = item.modifiedAt <= cached.downloadedAt.addingTimeInterval(1) && item.size == cached.size }
+                var deliveredItem: FileProviderItem?
+                let cachedHandoff: URL? = try syncManager.withJournalCommit {
+                    try validateRequestedContentVersion(requestedVersion, item: item)
+                    let metadata = try syncManager.getMetadataPersistent(fileId: effectiveId)
+                    initialMetadata = metadata
+                    let pending = try syncManager.queue.itemsForFilePersistent(fileId: effectiveId)
+                    let protectsEdit = metadata?.syncStatus.protectsLocalChanges == true || !pending.isEmpty
+                    let cacheMatchesRevision = metadata?.etag == item.etag
+                    var source: URL?
+                    if let path = metadata?.localPath, FileManager.default.fileExists(atPath: path), protectsEdit || cacheMatchesRevision {
+                        source = URL(fileURLWithPath: path)
+                    } else if cacheManager.isCached(fileId: effectiveId), protectsEdit || cacheMatchesRevision {
+                        source = cacheURL
+                    }
+                    if let source {
+                        // Local availability does not confirm that an edit was uploaded.
+                        cacheManager.updateLastAccessed(fileId: effectiveId)
+                        let snapshot = try ContentHandoff.create(from: source, domain: domain)
+                        deliveredItem = completionItem(item)
+                        return snapshot
+                    }
+                    guard !protectsEdit else { throw NSFileProviderError(.serverUnreachable) }
+                    var downloading = metadata ?? FileMetadata(fileId: effectiveId, name: item.name, parentId: item.parentId, isDirectory: false, syncStatus: .cloudOnly, remotePath: item.remotePath, size: item.size)
+                    downloading.syncStatus = .downloading
+                    downloading.downloadProgress = 0
+                    try syncManager.updateMetadataPersistent(downloading)
+                    return nil
                 }
-                if !valid, dirty, let path = metadata?.localPath, FileManager.default.fileExists(atPath: path) {
-                    try cacheManager.cacheFile(fileId: id, from: URL(fileURLWithPath: path))
-                    valid = true
-                }
-                if valid {
-                    cacheManager.updateLastAccessed(fileId: id)
-                    // Reading locally staged edits must not confirm their upload.
-                    let handoff = try ContentHandoff.create(from: cacheURL, domain: domain)
-                    try Task.checkCancellation()
+                if let cachedHandoff {
                     progress.completedUnitCount = 100
-                    completionHandler(handoff, makeItem(vfsItem: item, isEncrypted: vfs.isEncrypted), nil)
+                    completionHandler(cachedHandoff, deliveredItem, nil)
                     return
                 }
-                var downloading = metadata ?? FileMetadata(fileId: id, name: item.name, parentId: item.parentId, isDirectory: false, syncStatus: .cloudOnly, remotePath: item.remotePath, size: item.size)
-                downloading.syncStatus = .downloading
-                downloading.downloadProgress = 0
-                syncManager.updateMetadata(downloading)
+                guard let remotePath = item.remotePath ?? initialMetadata?.remotePath else { throw NSFileProviderError(.noSuchItem) }
+                let expected = requestedETag(requestedVersion, fileId: effectiveId, remoteETag: item.etag) ?? item.etag
+                if let requestedVersion, !requestedVersion.contentVersion.isEmpty,
+                   requestedVersion.contentVersion != NSFileProviderItemVersion.beforeFirstSyncComponent, expected == nil {
+                    throw NSFileProviderError(.versionNoLongerAvailable)
+                }
                 let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
                 defer { try? FileManager.default.removeItem(at: tempURL) }
-                try await vfs.downloadFile(fileId: id, to: tempURL) { fraction in
-                    progress.completedUnitCount = Int64(fraction * 100)
-                    if var update = self.syncManager.getMetadata(fileId: id), update.syncStatus == .downloading {
-                        update.downloadProgress = fraction
-                        self.syncManager.updateMetadata(update)
+                // Revision-aware download has no side effects on sync metadata.
+                let deliveredETag = try await vfs.downloadConflictContent(fileId: effectiveId, remotePath: remotePath, to: tempURL, expectedETag: expected)
+                try Task.checkCancellation()
+                let handoff = try syncManager.withJournalCommit {
+                    let current = try syncManager.getMetadataPersistent(fileId: effectiveId)
+                    guard current?.syncStatus == .downloading,
+                          current?.localPath == initialMetadata?.localPath,
+                          current?.localModifiedAt == initialMetadata?.localModifiedAt,
+                          (try syncManager.queue.itemsForFilePersistent(fileId: effectiveId)).isEmpty else {
+                        throw NSFileProviderError(.versionNoLongerAvailable)
+                    }
+                    if let expected, deliveredETag != expected { throw NSFileProviderError(.versionNoLongerAvailable) }
+                    try cacheManager.cacheFile(fileId: effectiveId, from: tempURL, confirmedETag: deliveredETag)
+                    var downloaded = current ?? FileMetadata(fileId: effectiveId, name: item.name, parentId: item.parentId, isDirectory: false, syncStatus: .synced, remotePath: remotePath, size: item.size)
+                    downloaded.syncStatus = .synced
+                    downloaded.etag = deliveredETag
+                    downloaded.localPath = cacheURL.path
+                    downloaded.downloadProgress = 1
+                    downloaded.lastSyncTime = Date()
+                    downloaded.remoteModifiedAt = item.modifiedAt
+                    try syncManager.updateMetadataPersistent(downloaded)
+                    let snapshot = try ContentHandoff.create(from: cacheURL, domain: domain)
+                    item.etag = deliveredETag
+                    deliveredItem = completionItem(item)
+                    return snapshot
+                }
+                item.etag = deliveredETag
+                progress.completedUnitCount = 100
+                completionHandler(handoff, deliveredItem, nil)
+            } catch {
+                try? syncManager.withJournalCommit {
+                    if var current = try syncManager.getMetadataPersistent(fileId: effectiveId), current.syncStatus == .downloading,
+                       current.localPath == initialMetadata?.localPath, current.localModifiedAt == initialMetadata?.localModifiedAt,
+                       (try syncManager.queue.itemsForFilePersistent(fileId: effectiveId)).isEmpty {
+                        current.syncStatus = initialMetadata?.syncStatus ?? .cloudOnly
+                        current.downloadProgress = initialMetadata?.downloadProgress ?? 0
+                        try syncManager.updateMetadataPersistent(current)
                     }
                 }
-                try Task.checkCancellation()
-                if let latest = syncManager.getMetadata(fileId: id), latest.syncStatus != .downloading && latest.syncStatus != .synced && latest.syncStatus != .cloudOnly {
-                    throw CocoaError(.fileWriteUnknown)
-                }
-                try cacheManager.cacheFile(fileId: id, from: tempURL)
-                // Providers record the actual GET response ETag; never replace it with listing metadata.
-                var downloaded = syncManager.getMetadata(fileId: id) ?? downloading
-                downloaded.syncStatus = .synced
-                downloaded.localPath = cacheURL.path
-                downloaded.downloadProgress = 1
-                downloaded.lastSyncTime = Date()
-                downloaded.localModifiedAt = item.modifiedAt
-                downloaded.remoteModifiedAt = item.modifiedAt
-                syncManager.updateMetadata(downloaded)
-                item = (try? findItem(identifier: id)) ?? item
-                let handoff = try ContentHandoff.create(from: cacheURL, domain: domain)
-                progress.completedUnitCount = 100
-                completionHandler(handoff, makeItem(vfsItem: item, isEncrypted: vfs.isEncrypted), nil)
-            } catch {
-                if var metadata = syncManager.getMetadata(fileId: id), metadata.syncStatus == .downloading {
-                    metadata.syncStatus = error is CancellationError ? .cloudOnly : .error
-                    syncManager.updateMetadata(metadata)
-                }
-                let mapped: Error = error is CancellationError ? CocoaError(.userCancelled) : (error as? NSFileProviderError ?? (error as? VFSError).map { mapToFileProviderError($0) } ?? NSFileProviderError(.serverUnreachable))
+                let mapped: Error = isReadRevisionConflict(error) ? NSFileProviderError(.versionNoLongerAvailable) : error is CancellationError ? CocoaError(.userCancelled) : (error as? NSFileProviderError ?? mapToFileProviderError(error))
                 completionHandler(nil, nil, mapped)
             }
         }
         progress.cancellationHandler = { task.cancel() }
-    return progress
+        return progress
     }
 }

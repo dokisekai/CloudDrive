@@ -4,7 +4,12 @@ import CloudDriveStorage
 extension VirtualFileSystem {
     public func configureStorage(configuration: StorageConfiguration) {
         print("⚙️ [VFS] Initializing storage client based on configuration: \(configuration.summaryDescription)")
-        let client = StorageClientFactory.createClient(configuration: configuration)
+        let client: StorageClient
+        if case .baidupan(let panConfig) = configuration, let vid = currentVaultId, !vid.isEmpty {
+            client = BaiduPanStorageClient(config: panConfig, vaultID: vid)
+        } else {
+            client = StorageClientFactory.createClient(configuration: configuration)
+        }
         configureStorage(client: client)
         print("✅ [VFS] Storage client configured successfully")
     }

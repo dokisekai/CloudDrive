@@ -25,12 +25,14 @@ public final class SyncService: @unchecked Sendable {
     let processingLock = NSLock()
     var isProcessingQueue = false
     var hasPendingQueueCheck = false
+    var journalFaultInjector: ((JournalFaultPoint) throws -> Void)?
     
     public let vaultId: String?
     let contextLock = NSLock()
     var storageClient: StorageClient?
     weak var configuredVFS: (any SyncVaultAccess)?
     var scheduledRetry: Task<Void, Never>?
+    var activeDrainTask: Task<Void, Never>?
     let automaticallyProcessesQueue: Bool
     let notifiesFileProvider: Bool
 
@@ -62,6 +64,9 @@ public final class SyncService: @unchecked Sendable {
         self.networkMonitor = networkMonitor
         self.conflictResolver = conflictResolver
         
+        do { try withJournalCommit {} }
+        catch { Logger.shared.error(.sync, "Cannot recover local sync commits: \(error.localizedDescription)") }
+
         // 注册网络恢复回调
         self.networkMonitor.onStatusChanged { [weak self] status in
             if status == .online {

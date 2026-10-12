@@ -10,14 +10,40 @@ extension FileProviderExtension {
         self.vfs = VirtualFileSystem(vaultId: vault.id)
         
         unlockTask = Task {
-            var targetVault = vault
+            guard vault.isStorageEnabled else {
+                throw StorageError.notSupported("Only WebDAV is enabled")
+            }
+            let targetVault = vault
             
-            // 1. Prefer unified multi-protocol storage configuration (S3, SMB, FTP, WebDAV, Local)
+            // Prefer the saved WebDAV configuration.
             if let config = targetVault.storageConfig {
                 let storagePassword = self.webdavPasswordFromUserInfo ?? self.getWebDAVPassword(for: targetVault.id) ?? ""
                 let effectiveConfig = (config.secret ?? "").isEmpty && !storagePassword.isEmpty ? config.replacingSecret(storagePassword) : config
-                logInfo(.system, "🔧 Loading storage with multi-protocol config: \(effectiveConfig.summaryDescription)")
-                let client = StorageClientFactory.createClient(configuration: effectiveConfig)
+                if case .baidupan(let panConfig) = targetVault.storageConfig {
+                    let tokenStore = BaiduPanTokenStore()
+                    tokenStore.cloneCredentials(from: "default", to: targetVault.id)
+                    if !panConfig.accessToken.isEmpty {
+                        try? tokenStore.saveAuthorized(
+                            vaultID: targetVault.id,
+                            appID: panConfig.appID,
+                            clientID: panConfig.appKey,
+                            accessToken: panConfig.accessToken,
+                            refreshToken: panConfig.refreshToken,
+                            expiresIn: 25 * 86400
+                        )
+                        try? tokenStore.saveAuthorized(
+                            vaultID: "default",
+                            appID: panConfig.appID,
+                            clientID: panConfig.appKey,
+                            accessToken: panConfig.accessToken,
+                            refreshToken: panConfig.refreshToken,
+                            expiresIn: 25 * 86400
+                        )
+                    }
+                }
+                var finalVault = targetVault
+                finalVault.storageConfig = effectiveConfig
+                let client = StorageClientFactory.createClient(for: finalVault, fallbackPassword: storagePassword)
                 self.vfs.configureStorage(client: client)
                 
                 let effectiveStoragePath = targetVault.storagePath.isEmpty ? "/" : targetVault.storagePath
@@ -25,7 +51,7 @@ extension FileProviderExtension {
                     logInfo(.system, "🔐 Vault is encrypted mode, unlocking (path: \(effectiveStoragePath))...")
                     guard let vaultPassword = self.vaultPasswordFromUserInfo ?? self.getVaultPassword(for: targetVault.id) else {
                         logError(.system, "❌ Failed to get vault encryption password")
-                        throw VFSError.invalidPassword
+                        throw VFSError.vaultLocked
                     }
                     try await self.vfs.unlockVault(password: vaultPassword, storagePath: effectiveStoragePath, vaultId: targetVault.id)
                     logSuccess(.system, "✅ Encrypted vault unlocked successfully")
@@ -35,39 +61,27 @@ extension FileProviderExtension {
                     logSuccess(.system, "✅ Direct mapping vault initialized successfully")
                 }
                 await VaultIgnoreManager.shared.loadIgnoreRules(vaultId: targetVault.id, vfs: self.vfs)
-                self.syncManager.processSyncQueue()
+                self.syncManager.recoverQueueOnUnlock()
                 await EnumeratorSignaler.shared.signalImmediately(for: self.domain)
                 return
-            }
-            
-            // If local storage vault without WebDAV URL, bridge to loopback port 28282 by default
-            if targetVault.webdavURL == nil && (targetVault.isLocal || !targetVault.storagePath.isEmpty) {
-                let fallbackURL = "http://127.0.0.1:28282/v/\(targetVault.id)/"
-                logInfo(.system, "🌐 Extension: Local vault auto-bridging to loopback: \(fallbackURL)")
-                targetVault.webdavURL = fallbackURL
-                targetVault.webdavUsername = "local"
-                if self.webdavPasswordFromUserInfo == nil {
-                    self.webdavPasswordFromUserInfo = "local"
-                }
             }
             
             if let webdavURL = targetVault.webdavURL,
                let webdavUsername = targetVault.webdavUsername,
                let url = URL(string: webdavURL) {
                 
-                logInfo(.webdav, "🔧 Configuring WebDAV storage: \(webdavURL)")
-                let password = self.webdavPasswordFromUserInfo ?? self.getWebDAVPassword(for: targetVault.id) ?? "local"
+                logInfo(.webdav, "🔧 Configuring WebDAV storage")
+                let password = self.webdavPasswordFromUserInfo ?? self.getWebDAVPassword(for: targetVault.id) ?? ""
                 
                 self.vfs.configureWebDAV(baseURL: url, username: webdavUsername, password: password)
                 
-                let isLoopback = webdavURL.contains("127.0.0.1") || webdavURL.contains("localhost")
-                let effectiveStoragePath = isLoopback ? "/" : targetVault.storagePath
+                let effectiveStoragePath = targetVault.storagePath
                 
                 if targetVault.isEncrypted {
                     logInfo(.system, "🔐 Vault is encrypted mode, unlocking (path: \(effectiveStoragePath))...")
                     guard let vaultPassword = self.vaultPasswordFromUserInfo ?? self.getVaultPassword(for: targetVault.id) else {
                         logError(.system, "❌ Failed to get vault encryption password")
-                        throw VFSError.invalidPassword
+                        throw VFSError.vaultLocked
                     }
                     try await self.vfs.unlockVault(password: vaultPassword, storagePath: effectiveStoragePath, vaultId: targetVault.id)
                     logSuccess(.system, "✅ Encrypted vault unlocked successfully")
@@ -77,39 +91,12 @@ extension FileProviderExtension {
                     logSuccess(.system, "✅ Direct mapping vault initialized successfully")
                 }
                 await VaultIgnoreManager.shared.loadIgnoreRules(vaultId: targetVault.id, vfs: self.vfs)
-                self.syncManager.processSyncQueue()
+                self.syncManager.recoverQueueOnUnlock()
                 await EnumeratorSignaler.shared.signalImmediately(for: self.domain)
                 return
             } else {
-                // Local storage vault
-                logInfo(.system, "📁 Configuring local storage vault: \(vault.storagePath)")
-                logInfo(.system, "🔐 Local vault security bookmark status: bookmarkDataFromUserInfo=\(self.bookmarkDataFromUserInfo != nil), vault.bookmarkData=\(vault.bookmarkData != nil)")
-                let localClient = LocalStorageClient()
-                localClient.configureSecurityScope(
-                    url: URL(fileURLWithPath: vault.storagePath),
-                    bookmarkData: self.bookmarkDataFromUserInfo ?? vault.bookmarkData
-                )
-                self.vfs.configureStorage(client: localClient)
-                logSuccess(.sync, "✅ Local storage client configured")
-                
-                if vault.isEncrypted {
-                    logInfo(.system, "🔐 Local vault is encrypted mode, unlocking...")
-                    guard let vaultPassword = self.vaultPasswordFromUserInfo ?? self.getVaultPassword(for: vault.id) else {
-                        logError(.system, "❌ Failed to get local vault encryption password (vaultId: \(vault.id))")
-                        throw VFSError.invalidPassword
-                    }
-                    do {
-                        try await self.vfs.unlockVault(password: vaultPassword, storagePath: vault.storagePath, vaultId: vault.id)
-                        logSuccess(.system, "✅ Local encrypted vault unlocked successfully")
-                    } catch {
-                        logError(.system, "❌ Local encrypted vault unlockVault failed: \(error)")
-                        throw error
-                    }
-                }
+                throw StorageError.notConfigured
             }
-            await VaultIgnoreManager.shared.loadIgnoreRules(vaultId: targetVault.id, vfs: self.vfs)
-            self.syncManager.processSyncQueue()
-            await EnumeratorSignaler.shared.signalImmediately(for: self.domain)
         }
     }
     

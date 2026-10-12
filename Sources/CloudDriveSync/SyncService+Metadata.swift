@@ -10,12 +10,25 @@
 
 import Foundation
 import CloudDriveContracts
+import CloudDriveSupport
 
 extension SyncService {
     // MARK: - 元数据转发
     
     public func updateMetadata(_ metadata: FileMetadata) {
         metadataStore.updateMetadata(metadata)
+    }
+    
+    public func updateMetadataBatch(_ items: [FileMetadata]) {
+        do {
+            try metadataStore.updateMetadataBatch(items)
+        } catch {
+            Logger.shared.error(.sync, "Failed to batch update metadata: \(error.localizedDescription)")
+        }
+    }
+    
+    public func updateMetadataBatchPersistent(_ items: [FileMetadata]) throws {
+        try metadataStore.updateMetadataBatch(items)
     }
     
     public func getMetadata(fileId: String) -> FileMetadata? {

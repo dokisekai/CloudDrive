@@ -8,9 +8,51 @@
 
 import SwiftUI
 import CloudDriveCore
+import UserNotifications
+
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("net.aabg.CloudDrive.userNotice"),
+            object: nil,
+            queue: .main
+        ) { note in
+            let title = note.userInfo?["title"] as? String ?? "CloudDrive"
+            let message = note.userInfo?["message"] as? String ?? ""
+            
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = message
+            content.sound = .default
+            
+            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(request)
+        }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        sender.activate(ignoringOtherApps: true)
+        for window in sender.windows {
+            if window.canBecomeMain || window.title.contains("CloudDrive") {
+                window.makeKeyAndOrderFront(nil)
+                return true
+            }
+        }
+        return true
+    }
+}
 
 @main
 struct CloudDriveApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var appState = AppState()
     @ObservedObject private var localization = LocalizationManager.shared
     @StateObject private var statusBarManager = StatusBarManager.shared
@@ -37,30 +79,15 @@ struct CloudDriveApp: App {
                         DispatchQueue.main.async {
                             NSApplication.shared.windows.first?.orderOut(nil)
                         }
+                    } else {
+                        DispatchQueue.main.async {
+                            NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
+                            NSApp.activate(ignoringOtherApps: true)
+                        }
                     }
                     
-                    Task {
-                        guard AppSettings.shared.autoMountOnLaunch else {
-                            logInfo(.system, "Auto-mount on launch is disabled globally in AppSettings")
-                            statusBarManager.updateStatusIcon()
-                            return
-                        }
-                        for vault in appState.vaults {
-                            if vault.isAutoMount {
-                                if appState.currentVault?.id == vault.id && vault.isMounted {
-                                    continue
-                                }
-                                logInfo(.system, "Auto-mounting vault: \(vault.name)")
-                                do {
-                                    try await appState.remountVault(vault)
-                                    logSuccess(.system, "Auto-mounted vault successfully: \(vault.name)")
-                                } catch {
-                                    logWarning(.system, "Failed to auto-mount vault \(vault.name): \(error.localizedDescription)")
-                                }
-                            }
-                        }
-                        statusBarManager.updateStatusIcon()
-                    }
+                    appState.autoMountEligibleVaults()
+                    statusBarManager.updateStatusIcon()
                 }
                 .onChange(of: appState.vaults) { _ in
                     statusBarManager.updateStatusIcon()

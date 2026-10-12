@@ -70,7 +70,7 @@ extension VirtualFileSystem {
     }
 
     public func isVaultMounted(vaultId: String) -> Bool {
-        return currentVaultId == vaultId
+        return currentVaultId == vaultId && activeProvider?.vaultId == vaultId
     }
 
     public func remountDirectMappingVault(vaultId: String, storagePath: String) async throws {
@@ -138,7 +138,7 @@ extension VirtualFileSystem {
         }
         
         // 检查是否已经是同一个保险库
-        if let currentVaultId = currentVaultId, currentVaultId == vaultId {
+        if let currentVaultId = currentVaultId, currentVaultId == vaultId, activeProvider != nil {
             print("✅ [VFS] Same vault already mounted, skipping")
             return
         }

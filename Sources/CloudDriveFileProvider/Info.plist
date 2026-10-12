@@ -12,22 +12,14 @@
 		<true/>
 		<key>NSFileProviderDefaultDomainVisible</key>
 		<true/>
+		<key>NSExtensionFileProviderAllowsUserControlledEviction</key>
+		<true/>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.fileprovider-nonui</string>
 		<key>NSExtensionPrincipalClass</key>
 		<string>$(PRODUCT_MODULE_NAME).FileProviderExtension</string>
 		<key>NSFileProviderDecorations</key>
 		<array>
-			<dict>
-				<key>Identifier</key>
-				<string>com.clouddrive.decoration.synced</string>
-				<key>BadgeImageType</key>
-				<string>com.apple.icon-decoration.badge.checkmark</string>
-				<key>Category</key>
-				<string>Badge</string>
-				<key>Label</key>
-				<string>Synced</string>
-			</dict>
 			<dict>
 				<key>Identifier</key>
 				<string>com.clouddrive.decoration.pinned</string>
@@ -40,26 +32,128 @@
 			</dict>
 			<dict>
 				<key>Identifier</key>
-				<string>com.clouddrive.decoration.syncing</string>
+				<string>com.clouddrive.decoration.warning</string>
+				<key>BadgeImageType</key>
+				<string>com.apple.icon-decoration.badge.warning</string>
+				<key>Category</key>
+				<string>Badge</string>
+				<key>Label</key>
+				<string>Warning</string>
+			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>com.clouddrive.decoration.pending</string>
 				<key>BadgeImageType</key>
 				<string>com.apple.icon-decoration.badge.syncing</string>
 				<key>Category</key>
 				<string>Badge</string>
 				<key>Label</key>
-				<string>Syncing</string>
+				<string>Waiting to Upload</string>
 			</dict>
 			<dict>
 				<key>Identifier</key>
-				<string>com.clouddrive.decoration.locked</string>
+				<string>com.clouddrive.decoration.excluded</string>
 				<key>BadgeImageType</key>
-				<string>com.apple.icon-decoration.badge.locked</string>
+				<string>com.apple.icon-decoration.badge.warning</string>
 				<key>Category</key>
 				<string>Badge</string>
 				<key>Label</key>
-				<string>Encrypted</string>
+				<string>已排除同步</string>
+			</dict>
+		</array>
+		<key>NSExtensionFileProviderActions</key>
+		<array>
+			<dict>
+				<key>Identifier</key>
+				<string>net.aabg.CloudDrive.action.syncNow</string>
+				<key>Title</key>
+				<string>立即与云端同步</string>
+				<key>PresentationContexts</key>
+				<array>
+					<string>file</string>
+					<string>directory</string>
+				</array>
+			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>net.aabg.CloudDrive.action.pin</string>
+				<key>Title</key>
+				<string>始终保留在此 Mac 上 (下载并常驻)</string>
+				<key>PresentationContexts</key>
+				<array>
+					<string>file</string>
+					<string>directory</string>
+				</array>
+			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>net.aabg.CloudDrive.action.unpin</string>
+				<key>Title</key>
+				<string>取消始终保留 (按需释放空间)</string>
+				<key>PresentationContexts</key>
+				<array>
+					<string>file</string>
+					<string>directory</string>
+				</array>
+			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>net.aabg.CloudDrive.action.secureEvict</string>
+				<key>Title</key>
+				<string>释放本地空间 (保留云端，移除本地副本)</string>
+				<key>PresentationContexts</key>
+				<array>
+					<string>file</string>
+					<string>directory</string>
+				</array>
+			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>net.aabg.CloudDrive.action.excludeFromSync</string>
+				<key>Title</key>
+				<string>从同步中排除 (仅保留在本地)</string>
+				<key>PresentationContexts</key>
+				<array>
+					<string>file</string>
+					<string>directory</string>
+				</array>
+			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>net.aabg.CloudDrive.action.resumeSync</string>
+				<key>Title</key>
+				<string>恢复云端同步</string>
+				<key>PresentationContexts</key>
+				<array>
+					<string>file</string>
+					<string>directory</string>
+				</array>
+			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>net.aabg.CloudDrive.action.lockVault</string>
+				<key>Title</key>
+				<string>锁定保险库 (卸载安全密钥)</string>
+				<key>PresentationContexts</key>
+				<array>
+					<string>file</string>
+					<string>directory</string>
+				</array>
+			</dict>
+			<dict>
+				<key>Identifier</key>
+				<string>net.aabg.CloudDrive.action.sanitizeVault</string>
+				<key>Title</key>
+				<string>校验保险库完整性</string>
+				<key>PresentationContexts</key>
+				<array>
+					<string>directory</string>
+				</array>
 			</dict>
 		</array>
 	</dict>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>NSFileProviderExtensionNonMaterializingProcessNames</key>
 	<array>
 		<string>mds</string>
@@ -69,6 +163,36 @@
 		<string>fseventsd</string>
 		<string>revisiond</string>
 		<string>suggestd</string>
+		<string>backupd</string>
+		<string>cloudd</string>
+	</array>
+	<key>NSFileProviderUserInteractions</key>
+	<array>
+		<dict>
+			<key>ActivationRule</key>
+			<string>(action == 'Delete' OR action == 'Trash') AND (sourceItem.filename ENDSWITH '.c9r' OR sourceItem.filename == 'masterkey.cryptomator' OR sourceItem.filename == 'vault.cryptomator' OR sourceItem.filename == 'dirid.c9r')</string>
+			<key>Alert</key>
+			<dict>
+				<key>LocalizedTitle</key>
+				<string>受保护的 Cryptomator 加密保险库核心文件</string>
+				<key>LocalizedSubTitle</key>
+				<string>此文件是加密保险库的关键索引与结构文件，删除将导致保险库损坏或文件永久无法解密。</string>
+				<key>LocalizedRecoveryOptions</key>
+				<dict>
+					<key>Continue</key>
+					<string>仍要删除 (极度危险)</string>
+					<key>Cancel</key>
+					<string>取消</string>
+				</dict>
+				<key>RecoveryOptions</key>
+				<dict>
+					<key>Continue</key>
+					<false/>
+					<key>Destructive</key>
+					<true/>
+				</dict>
+			</dict>
+		</dict>
 	</array>
 </dict>
 </plist>

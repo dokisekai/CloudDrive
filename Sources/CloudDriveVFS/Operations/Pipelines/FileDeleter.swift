@@ -39,7 +39,20 @@ public final class FileDeleter: @unchecked Sendable {
         
         do {
             // 1. 远端存储删除
-            try await storageClient.delete(path: remotePath)
+            let metadata = try context.syncService.metadataStore.getMetadataPersistent(fileId: fileId)
+            let directory = isDirectory || metadata?.isDirectory == true
+            let baseline = metadata?.remoteETag ?? metadata?.etag
+            let revision = directory
+                ? StorageContentVerification.collectionDeletionETag(baseline)
+                : try StorageContentVerification.mutationETag(baseline, required: storageClient.requiresETagForUpdate)
+            do {
+                try await storageClient.delete(path: remotePath, expectedETag: revision)
+            } catch {
+                if directory, revision == nil, StorageContentVerification.deletionOutcomeIsUncertain(error) {
+                    throw StorageError.indeterminateMutation("Collection DELETE must be checked before another deletion")
+                }
+                throw error
+            }
             
             // 2. 本地缓存清理
             context.tracker.updatePhase(id: opId, phase: .committingCache)

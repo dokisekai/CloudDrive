@@ -1,6 +1,9 @@
 # CloudDrive 系统架构与设计蓝图 (System Architecture)
 
-CloudDrive 是专为 macOS 设计的原生云存储客户端，基于 Apple File Provider 框架实现与 Finder 的原生无缝集成。系统支持多协议远端存储，并深度兼容 Cryptomator 客户端端到端加密格式。
+> **Native macOS File Provider for Cryptomator + WebDAV — encrypted files appear directly in Finder and download only when opened. Free and open source.**  
+> 🔗 **GitHub**: [https://github.com/dokisekai/CloudDrive](https://github.com/dokisekai/CloudDrive)
+
+CloudDrive 是专为 macOS 设计的原生云存储客户端，基于 Apple File Provider 现代框架（`NSFileProviderReplicatedExtension`）实现与访达 (Finder) 的原生无缝集成。加密文件直接在访达中显示，无需下载整库，按需流式读取，并 100% 完全兼容 Cryptomator 官方端到端零知识加密格式。可搭配 Alist 聚合挂载数十种网盘。
 
 ---
 
@@ -119,7 +122,9 @@ graph TB
 
 ---
 
-## 4. 构建、测试与运行
-
+## 4. 构建、激活与分发
+ 
 - **测试套件**：统一执行 `./scripts/test.sh` 或 `swift run CloudDriveTestsRunner`。测试源码位于 `Tests/CloudDriveCoreTests/`。
-- **构建安装**：运行 `./scripts/install.sh` 进行 Release 编译、代码签名并覆盖安装至 `/Applications/CloudDrive.app`。
+- **预编译版激活 (免 Xcode)**：解压 `CloudDrive-macOS-Release.zip` 后运行 `bash activate.sh`，就地完成沙盒注入与系统扩展注册。
+- **源码构建与安装**：运行 `./scripts/install.sh`（或加 `--universal` 编译双架构）进行本地编译、签名并安装至 `/Applications/CloudDrive.app`。
+- **发布打包**：运行 `./scripts/package.sh` 自动生成包含 Universal 2（arm64 + x86_64）双架构的分发包 `build/CloudDrive-macOS-Release.zip`。

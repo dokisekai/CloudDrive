@@ -12,28 +12,42 @@ import Foundation
 import CryptoKit
 
 public enum CloudDrivePaths {
-    /// Unified retrieval of base directory (.CloudDrive) shared between Main App and FileProvider Extension
+    /// POSIX 0700 (rwx------) 仅限当前用户读写执行的安全目录权限
+    public static let secureDirectoryAttributes: [FileAttributeKey: Any] = [
+        .posixPermissions: 0o700
+    ]
+    
+    public static func secureDirectory(at url: URL) {
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: secureDirectoryAttributes)
+        } else {
+            try? FileManager.default.setAttributes(secureDirectoryAttributes, ofItemAtPath: url.path)
+        }
+    }
+
     public static var sharedDirectory: URL {
         if let groupURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.net.aabg.CloudDrive") {
             let appDir = groupURL.appendingPathComponent(".CloudDrive", isDirectory: true)
-            if !FileManager.default.fileExists(atPath: appDir.path) {
-                try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
-            }
+            secureDirectory(at: appDir)
             // Real write probe to avoid false negative from FileManager.isWritableFile in sandbox Group Container
             let testFile = appDir.appendingPathComponent(".probe_\(UUID().uuidString)")
             if (try? "probe".write(to: testFile, atomically: true, encoding: .utf8)) != nil {
                 try? FileManager.default.removeItem(at: testFile)
+                NSLog("📁 [CloudDrivePaths] Resolved Group Container sharedDirectory: %@", appDir.path)
                 return appDir
+            } else {
+                NSLog("⚠️ [CloudDrivePaths] Failed write probe in Group Container: %@, falling back", appDir.path)
             }
+        } else {
+            NSLog("⚠️ [CloudDrivePaths] containerURL for group.net.aabg.CloudDrive is nil, falling back")
         }
         
         // Fallback to standard Application Support directory in sandbox environment
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         let fallback = appSupport.appendingPathComponent(".CloudDrive", isDirectory: true)
-        if !FileManager.default.fileExists(atPath: fallback.path) {
-            try? FileManager.default.createDirectory(at: fallback, withIntermediateDirectories: true)
-        }
+        secureDirectory(at: fallback)
+        NSLog("📁 [CloudDrivePaths] Fallback sandbox sharedDirectory: %@", fallback.path)
         return fallback
     }
     
@@ -42,16 +56,14 @@ public enum CloudDrivePaths {
         let digest = SHA256.hash(data: Data(vaultId.utf8)).map { String(format: "%02x", $0) }.joined()
         let directory = sharedDirectory.appendingPathComponent("Vaults", isDirectory: true)
             .appendingPathComponent(digest, isDirectory: true)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        secureDirectory(at: directory)
         return directory
     }
 
     /// Persistent thumbnail cache directory
     public static var thumbnailsDirectory: URL {
         let dir = sharedDirectory.appendingPathComponent("thumbnails", isDirectory: true)
-        if !FileManager.default.fileExists(atPath: dir.path) {
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
+        secureDirectory(at: dir)
         return dir
     }
 

@@ -72,10 +72,17 @@ public class CacheManager: ConflictContentAccess {
         try service.cacheFile(fileId: fileId, data: data, policy: policy)
     }
     
-    public func cacheFile(fileId: String, from sourceURL: URL, policy: CachePolicy = .automatic) throws {
-        try service.cacheFile(fileId: fileId, from: sourceURL, policy: policy)
+    public func cacheFile(fileId: String, from sourceURL: URL, policy: CachePolicy = .automatic, confirmedETag: String? = nil) throws {
+        try service.cacheFile(fileId: fileId, from: sourceURL, policy: policy, confirmedETag: confirmedETag)
     }
     
+    public func matchingConfirmedSource(for incomingFileId: String) -> (fileId: String, etag: String)? {
+        service.matchingConfirmedSource(for: incomingFileId)
+    }
+    public func bindAcceptedGeneration(fileId: String, modifiedAt: Date) {
+        service.bindAcceptedGeneration(fileId: fileId, modifiedAt: modifiedAt)
+    }
+
     public func postCacheEvictionNotification(fileId: String?) {
         service.notifier.postEvictionNotification(fileId: fileId)
     }
@@ -116,6 +123,66 @@ public class CacheManager: ConflictContentAccess {
         service.getCacheStatistics()
     }
     
+    public func getDynamicCacheStatistics() -> (totalSize: Int64, fileCount: Int) {
+        service.getDynamicCacheStatistics()
+    }
+    
+    public func getPinnedCacheStatistics() -> (totalSize: Int64, fileCount: Int) {
+        service.getPinnedCacheStatistics()
+    }
+    
+    public func currentDynamicCacheSize() -> Int64 {
+        service.getDynamicCacheStatistics().totalSize
+    }
+    
+    public func currentPinnedCacheSize() -> Int64 {
+        service.getPinnedCacheStatistics().totalSize
+    }
+    
+    public static func dynamicCacheSize(for vaultId: String) -> Int64 {
+        forVault(vaultId).currentDynamicCacheSize()
+    }
+    
+    public static func pinnedCacheSize(for vaultId: String) -> Int64 {
+        forVault(vaultId).currentPinnedCacheSize()
+    }
+    
+    public static func totalDynamicCacheSizeAcrossAllVaults(knownVaultIds: [String] = []) -> Int64 {
+        var total: Int64 = 0
+        var evaluated = Set<String>()
+        for vid in knownVaultIds {
+            evaluated.insert(vid)
+            total += forVault(vid).currentDynamicCacheSize()
+        }
+        scopedLock.lock()
+        let scopedIds = Array(scoped.keys)
+        scopedLock.unlock()
+        for vid in scopedIds where !evaluated.contains(vid) {
+            evaluated.insert(vid)
+            total += forVault(vid).currentDynamicCacheSize()
+        }
+        total += shared.currentDynamicCacheSize()
+        return total
+    }
+    
+    public static func totalPinnedCacheSizeAcrossAllVaults(knownVaultIds: [String] = []) -> Int64 {
+        var total: Int64 = 0
+        var evaluated = Set<String>()
+        for vid in knownVaultIds {
+            evaluated.insert(vid)
+            total += forVault(vid).currentPinnedCacheSize()
+        }
+        scopedLock.lock()
+        let scopedIds = Array(scoped.keys)
+        scopedLock.unlock()
+        for vid in scopedIds where !evaluated.contains(vid) {
+            evaluated.insert(vid)
+            total += forVault(vid).currentPinnedCacheSize()
+        }
+        total += shared.currentPinnedCacheSize()
+        return total
+    }
+    
     public func readCachedFile(fileId: String) throws -> Data {
         try service.readCachedFile(fileId: fileId)
     }
@@ -128,16 +195,16 @@ public class CacheManager: ConflictContentAccess {
         try service.moveCache(from: oldFileId, to: newFileId)
     }
     
-    public func moveDirectoryCache(from oldDirId: String, to newDirId: String) {
-        service.moveDirectoryCache(from: oldDirId, to: newDirId)
+    public func moveDirectoryCache(from oldDirId: String, to newDirId: String) throws {
+        try service.moveDirectoryCache(from: oldDirId, to: newDirId)
     }
     
     public func removeDirectoryCache(forDirectoryPrefix dirPrefix: String) {
         service.removeDirectoryCache(forDirectoryPrefix: dirPrefix)
     }
     
-    public func cloneCache(from sourceFileId: String, to destinationFileId: String) throws {
-        try service.cloneCache(from: sourceFileId, to: destinationFileId)
+    public func cloneCache(from sourceFileId: String, to destinationFileId: String, confirmedETag: String? = nil) throws {
+        try service.cloneCache(from: sourceFileId, to: destinationFileId, confirmedETag: confirmedETag)
     }
     
     public func clearAllCache() throws {

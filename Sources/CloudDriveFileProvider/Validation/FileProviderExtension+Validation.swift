@@ -19,22 +19,47 @@ extension FileProviderExtension {
         return (error as? NSFileProviderError)?.code == .serverUnreachable
     }
 
-    func validateBaseVersion(_ version: NSFileProviderItemVersion, item: VirtualFileItem, preserving contents: URL? = nil) throws {
-        let current = makeItem(vfsItem: item, isEncrypted: vfs.isEncrypted).itemVersion.contentVersion
-        guard !version.contentVersion.isEmpty, version.contentVersion != NSFileProviderItemVersion.beforeFirstSyncComponent, version.contentVersion != current else { return }
-        // Retain the user's conflicting bytes independently of the system-owned URL.
-        if let contents {
-            let directory = CloudDrivePaths.vaultDirectory(for: currentVaultIdentifier).appendingPathComponent("Conflicts", isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let saved = directory.appendingPathComponent(UUID().uuidString + "_" + item.name)
-            if copyfile(contents.path, saved.path, nil, copyfile_flags_t(COPYFILE_CLONE)) != 0 {
-                try FileManager.default.copyItem(at: contents, to: saved)
+    func isReadRevisionConflict(_ error: Error) -> Bool {
+        if (error as? StorageError)?.isPreconditionFailure == true { return true }
+        if case WebDAVError.serverError(let status) = error { return status == 412 }
+        return false
+    }
+
+    func requestedETag(_ version: NSFileProviderItemVersion?, fileId: String? = nil, remoteETag: String? = nil) -> String? {
+        guard let bytes = version?.contentVersion, let value = String(data: bytes, encoding: .utf8) else { return nil }
+        if value.hasPrefix("etag-sha256:") {
+            var candidates = [remoteETag]
+            if let fileId, let metadata = try? syncManager.getMetadataPersistent(fileId: fileId) {
+                candidates += [metadata.remoteETag, metadata.etag]
             }
-            var metadata = syncManager.getMetadata(fileId: item.id) ?? FileMetadata(fileId: item.id, name: item.name, parentId: item.parentId, isDirectory: item.isDirectory, syncStatus: .conflict, remotePath: item.remotePath)
-            metadata.syncStatus = .conflict
-            metadata.localPath = saved.path
-            syncManager.updateMetadata(metadata)
+            return candidates.compactMap { $0 }.first { ContentRevision.tokenForETag($0) == value }
         }
-        throw NSFileProviderError(.cannotSynchronize)
+        guard value.hasPrefix("etag:") else { return nil }
+        let tag = String(value.dropFirst(5))
+        return tag.isEmpty ? nil : tag
+    }
+
+    func validateRequestedContentVersion(_ version: NSFileProviderItemVersion?, item: VirtualFileItem) throws {
+        guard let version, !version.contentVersion.isEmpty,
+              version.contentVersion != NSFileProviderItemVersion.beforeFirstSyncComponent else { return }
+        _ = try syncManager.getMetadataPersistent(fileId: item.id)
+        let current = makeItem(vfsItem: item, isEncrypted: vfs.isEncrypted).itemVersion.contentVersion
+        guard version.contentVersion == current else { throw NSFileProviderError(.versionNoLongerAvailable) }
+    }
+
+    func validateBaseVersion(_ version: NSFileProviderItemVersion, item: VirtualFileItem, preserving contents: URL? = nil) throws {
+        _ = try syncManager.getMetadataPersistent(fileId: item.id)
+        let current = makeItem(vfsItem: item, isEncrypted: vfs.isEncrypted).itemVersion.contentVersion
+        guard !version.contentVersion.isEmpty,
+              version.contentVersion != NSFileProviderItemVersion.beforeFirstSyncComponent,
+              version.contentVersion != current else { return }
+        if let contents {
+            // Saving a stale Finder edit cannot replace the newer revision.
+            // Make the rejected content independently recoverable before failing.
+            let backup = DeletedPayloadBackupStore(vaultId: currentVaultIdentifier)
+            _ = try backup.preserve(source: contents, fileId: item.id, name: item.name, parentId: item.parentId, remotePath: item.remotePath, expectedETag: requestedETag(version, fileId: item.id))
+        }
+        signalEnumeratorDebounced(for: .workingSet)
+        throw NSFileProviderError(.versionNoLongerAvailable)
     }
 }

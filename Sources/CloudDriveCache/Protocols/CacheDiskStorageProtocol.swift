@@ -29,6 +29,7 @@ public protocol CacheDiskStorageProtocol: Sendable {
     
     /// 从源文件复制/克隆入缓存 (优先 APFS CoW)
     func cache(from sourceURL: URL, for fileId: String) throws -> Int64
+    func cache(from sourceURL: URL, for fileId: String, onHashedContent: ((String) -> Void)?) throws -> Int64
     
     /// 读取缓存文件二进制
     func read(fileId: String) throws -> Data
@@ -63,4 +64,7 @@ public protocol CacheDiskStorageProtocol: Sendable {
 
 public extension CacheDiskStorageProtocol {
     func pruneBlobs() {}
+    func cache(from sourceURL: URL, for fileId: String, onHashedContent: ((String) -> Void)?) throws -> Int64 {
+        try cache(from: sourceURL, for: fileId)
+    }
 }

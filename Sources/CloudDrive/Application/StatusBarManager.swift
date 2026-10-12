@@ -10,8 +10,10 @@
 
 import SwiftUI
 import AppKit
+import Combine
 import FileProvider
 import CloudDriveCore
+import CloudDriveSystem
 
 @MainActor
 class StatusBarManager: ObservableObject {
@@ -80,13 +82,21 @@ class StatusBarManager: ObservableObject {
     func updateStatusIcon() {
         guard let button = statusItem?.button else { return }
         
+        let activeCount = FileProgressPublisher.shared.getActiveTransfers().count
+        if activeCount > 0 {
+            button.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Syncing")
+            return
+        }
+        
         if let appState = appState {
             let mountedCount = appState.vaults.filter(\.isMounted).count
             if mountedCount > 0 {
-                button.image = NSImage(systemSymbolName: "externaldrive.fill.badge.checkmark", accessibilityDescription: "CloudDrive")
+                button.image = NSImage(systemSymbolName: "icloud.fill", accessibilityDescription: "CloudDrive")
             } else {
-                button.image = NSImage(systemSymbolName: "cloud.fill", accessibilityDescription: "CloudDrive")
+                button.image = NSImage(systemSymbolName: "icloud", accessibilityDescription: "CloudDrive")
             }
+        } else {
+            button.image = NSImage(systemSymbolName: "icloud", accessibilityDescription: "CloudDrive")
         }
     }
     
@@ -119,6 +129,7 @@ class StatusBarManager: ObservableObject {
 struct StatusBarPopoverView: View {
     @ObservedObject var statusBarManager: StatusBarManager
     @ObservedObject private var localization = LocalizationManager.shared
+    @State private var activeTransfers: [ActiveTransferInfo] = FileProgressPublisher.shared.getActiveTransfers()
     
     private var appState: AppState? {
         statusBarManager.appState
@@ -130,9 +141,9 @@ struct StatusBarPopoverView: View {
             HStack(spacing: 10) {
                 ZStack {
                     Circle()
-                        .fill(Color.blue.opacity(0.15))
+                        .fill(Color.blue.opacity(0.12))
                         .frame(width: 32, height: 32)
-                    Image(systemName: "cloud.fill")
+                    Image(systemName: "icloud.fill")
                         .foregroundColor(.blue)
                         .font(.system(size: 16))
                 }
@@ -169,7 +180,59 @@ struct StatusBarPopoverView: View {
             
             Divider()
             
-            // 2. 保险库快速操作列表
+            // 2. 状态管理面板 (参考 iCloud: 传输中展示实时进度列表，空闲时展示“已全部同步/最新状态”)
+            if !activeTransfers.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Label(L("popover_syncing_title"), systemImage: "arrow.triangle.2.circlepath")
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text("\(activeTransfers.count)")
+                            .font(.caption2)
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.15))
+                            .foregroundColor(.blue)
+                            .clipShape(Capsule())
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.top, 8)
+                    
+                    ScrollView {
+                        VStack(spacing: 6) {
+                            ForEach(activeTransfers) { item in
+                                StatusBarTransferRow(transfer: item)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 6)
+                    }
+                    .frame(maxHeight: 140)
+                    
+                    Divider()
+                }
+            } else if let appState = appState, appState.vaults.contains(where: \.isMounted) {
+                // iCloud 风格：所有文件已同步完成的轻量状态提示
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.system(size: 13))
+                    Text(L("status_all_synced_desc"))
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
+                
+                Divider()
+            }
+            
+            // 3. 保险库快速操作列表
             if let appState = appState, !appState.vaults.isEmpty {
                 ScrollView {
                     VStack(spacing: 6) {
@@ -194,7 +257,7 @@ struct StatusBarPopoverView: View {
             
             Divider()
             
-            // 3. 底部功能按钮组
+            // 4. 底部功能按钮组
             VStack(spacing: 4) {
                 Button {
                     openMainWindow()
@@ -249,6 +312,15 @@ struct StatusBarPopoverView: View {
             .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
         }
         .frame(width: 330)
+        .onReceive(NotificationCenter.default.publisher(for: FileProgressPublisher.transferDidUpdateNotification)) { _ in
+            activeTransfers = FileProgressPublisher.shared.getActiveTransfers()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: FileProgressPublisher.transferDidCompleteNotification)) { _ in
+            activeTransfers = FileProgressPublisher.shared.getActiveTransfers()
+        }
+        .onAppear {
+            activeTransfers = FileProgressPublisher.shared.getActiveTransfers()
+        }
     }
     
     private func openMainWindow() {
@@ -282,20 +354,41 @@ struct StatusBarVaultRow: View {
     
     var body: some View {
         HStack(spacing: 8) {
-            // 状态原点
-            Circle()
-                .fill(vault.isMounted ? Color.green : Color.secondary.opacity(0.4))
-                .frame(width: 7, height: 7)
+            // 优雅的 iCloud 风格挂载图标
+            Image(systemName: vault.isMounted ? "icloud.fill" : "icloud")
+                .font(.system(size: 14))
+                .foregroundColor(vault.isMounted ? .blue : .secondary.opacity(0.6))
             
-            // 协议小图标
-            Image(systemName: vault.storageType.iconName)
-                .font(.system(size: 11))
-                .foregroundColor(vault.storageType.themeColor)
-            
-            // 名称
-            Text(vault.name)
-                .font(.system(size: 12, weight: .medium))
-                .lineLimit(1)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(vault.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                
+                HStack(spacing: 4) {
+                    Text(vault.storageType.localizedName)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                    
+                    Text("•")
+                        .font(.system(size: 8))
+                        .foregroundColor(.secondary.opacity(0.5))
+                    
+                    Text(vault.isMounted ? L("vault_status_mounted") : L("vault_status_unmounted"))
+                        .font(.system(size: 9))
+                        .foregroundColor(vault.isMounted ? .green : .secondary)
+                    
+                    if vault.isMounted {
+                        let cacheMB = CacheManager.forVault(vault.id).currentCacheSize() / (1024 * 1024)
+                        let maxGB = CacheManager.forVault(vault.id).maxCacheSize / (1024 * 1024 * 1024)
+                        Text("•")
+                            .font(.system(size: 8))
+                            .foregroundColor(.secondary.opacity(0.5))
+                        Text("缓存 \(cacheMB)M/\(maxGB)G")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
             
             Spacer()
             
@@ -333,13 +426,17 @@ struct StatusBarVaultRow: View {
                     Button {
                         doMount()
                     } label: {
-                        Text(L("popover_quick_mount"))
-                            .font(.system(size: 10, weight: .medium))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.accentColor.opacity(0.15))
-                            .foregroundColor(.accentColor)
-                            .cornerRadius(4)
+                        HStack(spacing: 3) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 8))
+                            Text(L("vault_card_mount"))
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.15))
+                        .foregroundColor(.accentColor)
+                        .cornerRadius(4)
                     }
                     .buttonStyle(.plain)
                 }
@@ -352,6 +449,12 @@ struct StatusBarVaultRow: View {
     }
     
     private func doMount() {
+        if vault.isEncrypted && appState.getVaultPassword(for: vault.id) == nil {
+            appState.selectedVaultForUnlock = vault
+            appState.showUnlockVault = true
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         isProcessing = true
         Task {
             do {
@@ -403,15 +506,83 @@ struct StatusBarVaultRow: View {
     }
 }
 
+// MARK: - 状态栏传输任务行卡片
+
+struct StatusBarTransferRow: View {
+    let transfer: ActiveTransferInfo
+    @ObservedObject private var localization = LocalizationManager.shared
+    
+    private var speedText: String {
+        if transfer.isPaused {
+            return L("transfer_paused")
+        }
+        guard transfer.speedBytesPerSec > 0 else { return "-- KB/s" }
+        return ByteCountFormatter.string(fromByteCount: transfer.speedBytesPerSec, countStyle: .file) + "/s"
+    }
+    
+    private var progressText: String {
+        let completed = ByteCountFormatter.string(fromByteCount: transfer.completedBytes, countStyle: .file)
+        if transfer.totalBytes > 0 {
+            let total = ByteCountFormatter.string(fromByteCount: transfer.totalBytes, countStyle: .file)
+            return "\(completed) / \(total)"
+        } else {
+            return completed
+        }
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: transfer.kind == .downloading ? "icloud.and.arrow.down.fill" : "icloud.and.arrow.up.fill")
+                    .foregroundColor(transfer.kind == .downloading ? .indigo : .blue)
+                    .font(.system(size: 13))
+                
+                Text(transfer.fileName)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                
+                Spacer()
+                
+                Text(speedText)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .monospacedDigit()
+            }
+            
+            ProgressView(value: transfer.progressFraction)
+                .progressViewStyle(.linear)
+            
+            HStack {
+                Text(progressText)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .monospacedDigit()
+                
+                Spacer()
+                
+                Text("\(Int(transfer.progressFraction * 100))%")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .padding(8)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+        .cornerRadius(6)
+    }
+}
+
 extension StorageType {
     var themeColor: Color {
         switch self {
         case .webdav: return .teal
         case .s3: return .orange
-        case .smb: return .blue
-        case .ftp: return .cyan
-        case .pan123: return .indigo
-        case .local: return .secondary
+        case .baidupan: return .blue
+        case .smb: return .purple
+        case .ftp: return .yellow
+        case .pan123: return .cyan
+        case .local: return .green
         }
     }
 }

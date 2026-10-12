@@ -9,6 +9,7 @@ public enum WebDAVError: Error, CustomNSError {
     case fileNotFound
     case notConnectedToInternet
     case timeout
+    case invalidPath
     
     public static var errorDomain: String {
         return "com.clouddrive.webdav"
@@ -32,6 +33,8 @@ public enum WebDAVError: Error, CustomNSError {
             return 1006
         case .timeout:
             return 1007
+        case .invalidPath:
+            return 1008
         }
     }
     
@@ -53,6 +56,8 @@ public enum WebDAVError: Error, CustomNSError {
             return [NSLocalizedDescriptionKey: "Not connected to internet"]
         case .timeout:
             return [NSLocalizedDescriptionKey: "Request timed out"]
+        case .invalidPath:
+            return [NSLocalizedDescriptionKey: "Invalid WebDAV path"]
         }
     }
 }

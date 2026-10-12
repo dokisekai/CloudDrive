@@ -78,43 +78,44 @@ public final class VaultIgnoreManager {
         Logger.shared.info(.sync, "Vault \(vaultId): Saved and encrypted .clouddriveignore to vault and database")
     }
     
+    /// 默认的 .clouddriveignore 模板
+    public static let defaultContent = """
+    # CloudDrive Vault Ignore Rules
+    # 语法完全兼容 .gitignore 标准
+    # 此文件存储在加密库内部根目录下，并由客户端自动端到端加密
+    # 脱离 CloudDrive 软件，使用官方 Cryptomator 客户端挂载后，此文件依然在根目录可见并可修改！
+    
+    # === 编译产物与构建缓存 ===
+    target/
+    build/
+    out/
+    dist/
+    .gradle/
+    
+    # === 依赖项缓存 ===
+    node_modules/
+    .pnpm-store/
+    __pycache__/
+    *.pyc
+    .venv/
+    venv/
+    
+    # === IDE 配置与临时文件 ===
+    .idea/
+    .vscode/
+    DerivedData/
+    *.tmp
+    *.log
+    .cache/
+    
+    # === 反向放行示例 (以 ! 开头表示绝不忽略) ===
+    # !important.log
+    """
+
     /// 生成并上传默认的 .clouddriveignore 模板
     public func createDefaultIgnoreFileIfNeeded(vaultId: String, vfs: any VaultIgnoreVFSDelegate) async {
-        let defaultContent = """
-        # CloudDrive Vault Ignore Rules
-        # 语法完全兼容 .gitignore 标准
-        # 此文件存储在加密库内部根目录下，并由客户端自动端到端加密
-        # 脱离 CloudDrive 软件，使用官方 Cryptomator 客户端挂载后，此文件依然在根目录可见并可修改！
-        
-        # === 编译产物与构建缓存 ===
-        target/
-        build/
-        out/
-        dist/
-        .gradle/
-        
-        # === 依赖项缓存 ===
-        node_modules/
-        .pnpm-store/
-        __pycache__/
-        *.pyc
-        .venv/
-        venv/
-        
-        # === IDE 配置与临时文件 ===
-        .idea/
-        .vscode/
-        DerivedData/
-        *.tmp
-        *.log
-        .cache/
-        
-        # === 反向放行示例 (以 ! 开头表示绝不忽略) ===
-        # !important.log
-        """
-        
         do {
-            try await saveIgnoreRules(vaultId: vaultId, vfs: vfs, content: defaultContent)
+            try await saveIgnoreRules(vaultId: vaultId, vfs: vfs, content: Self.defaultContent)
             Logger.shared.info(.sync, "Vault \(vaultId): Created default .clouddriveignore")
         } catch {
             Logger.shared.warning(.sync, "Vault \(vaultId): Failed to create default .clouddriveignore: \(error.localizedDescription)")

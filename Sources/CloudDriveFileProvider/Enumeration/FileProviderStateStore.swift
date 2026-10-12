@@ -58,7 +58,7 @@ final class FileProviderStateStore {
     private func fingerprint(_ item: FileProviderItem) -> Data {
         var data = item.itemVersion.contentVersion
         data.append(item.itemVersion.metadataVersion)
-        data.append(Data("|\(item.filename)|\(item.parentItemIdentifier.rawValue)|\(item.isUploaded)|\(item.isDownloaded)|\(item.isUploading)|\(item.isDownloading)|\(item.downloadProgress)|\(String(describing: item.contentPolicy))".utf8))
+        data.append(Data("|\(item.filename)|\(item.parentItemIdentifier.rawValue)|\(item.isUploaded)|\(item.isDownloaded)|\(item.isUploading)|\(item.isDownloading)|\(item.downloadProgress)|\(String(describing: item.contentPolicy))|\(item.capabilities.rawValue)|\(item.parentItemIdentifier == .trashContainer)".utf8))
         return data
     }
     private func anchor(_ sequence: UInt64) -> NSFileProviderSyncAnchor { NSFileProviderSyncAnchor(Data("v1:\(sequence)".utf8)) }

@@ -21,39 +21,34 @@ extension WebDAVClient {
         }
         
         let url = try buildURL(for: path)
-        print("📡 WebDAV: Delete URL: \(url.absoluteString)")
+        print("📡 WebDAV: Delete host: \(url.host ?? "")")
         
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         request.timeoutInterval = 30  // 30秒超时
         
         // 添加认证
-        if let credentials = credentials {
-            let authString = "\(credentials.user!):\(credentials.password!)"
-            if let authData = authString.data(using: .utf8) {
-                let base64Auth = authData.base64EncodedString()
-                request.setValue("Basic \(base64Auth)", forHTTPHeaderField: "Authorization")
-                print("🔑 WebDAV: Authorization added (User: \(credentials.user!))")
-            }
-        } else {
-            print("⚠️ WebDAV: No credentials configured")
-        }
+        addAuthentication(to: &request)
 
         if let expectedETag = expectedETag {
-            guard !expectedETag.hasPrefix("W/") else {
-                throw StorageError.notSupported("A weak ETag cannot protect a delete operation")
-            }
-            request.setValue(expectedETag, forHTTPHeaderField: "If-Match")
+            request.setValue(try WebDAVEntityTag.strong(expectedETag), forHTTPHeaderField: "If-Match")
         }
         
         print("📤 WebDAV: Sending DELETE request...")
         
         // Destructive mutations do NOT use WebDAVRetryPolicy.perform; a dropped response
         // must not cause a second blind deletion against a recreated resource.
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do { (data, response) = try await boundedResponse(for: request) }
+        catch {
+            if expectedETag == nil { throw StorageError.indeterminateMutation("DELETE response unavailable: " + error.localizedDescription) }
+            throw error
+        }
         
         guard let httpResponse = response as? HTTPURLResponse else {
             print("❌ WebDAV: Invalid response")
+            if expectedETag == nil { throw StorageError.indeterminateMutation("DELETE returned no HTTP response") }
             throw WebDAVError.invalidResponse
         }
         
@@ -70,7 +65,14 @@ extension WebDAVClient {
             throw StorageError.serverError(statusCode: 412, message: "Precondition Failed: remote resource version does not match delete baseline")
         }
         
-        try WebDAVMutationResponseValidator.validate(statusCode: httpResponse.statusCode, data: data)
+        do { try WebDAVMutationResponseValidator.validate(statusCode: httpResponse.statusCode, data: data) }
+        catch {
+            if expectedETag == nil { throw StorageError.indeterminateMutation("Collection DELETE may have partially completed: " + error.localizedDescription) }
+            throw error
+        }
+        if expectedETag == nil, httpResponse.statusCode >= 500 {
+            throw StorageError.indeterminateMutation("DELETE returned HTTP \(httpResponse.statusCode); its remote effect is unknown")
+        }
         
         guard (200...299).contains(httpResponse.statusCode) else {
             print("❌ WebDAV: Delete failed - HTTP \(httpResponse.statusCode)")

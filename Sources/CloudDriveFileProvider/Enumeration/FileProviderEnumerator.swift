@@ -21,15 +21,26 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
 
     private func loadItems() async throws -> [FileProviderItem] {
         try Task.checkCancellation()
-        if let ext = extensionRef { try await ext.ensureVaultUnlocked() }
+        if let ext = extensionRef {
+            do {
+                try await ext.ensureVaultUnlocked()
+            } catch VFSError.vaultLocked {
+                let center = DistributedNotificationCenter.default()
+                center.postNotificationName(
+                    NSNotification.Name("net.aabg.CloudDrive.requestUnlock"),
+                    object: nil,
+                    userInfo: ["vaultId": vaultId],
+                    deliverImmediately: true
+                )
+                throw VFSError.vaultLocked
+            }
+        }
         let manager = vfs.syncManager
         var items: [String: VirtualFileItem] = [:]
         if enumeratedItemIdentifier == .workingSet {
             let root = (try? vfs.listDirectory(directoryId: "ROOT")) ?? []
             for item in root { items[item.id] = item }
-            if RecycleBinConfig.isEnabled(for: vaultId), let bin = vfs.getRecycleBinDirectory() {
-                items[bin.id] = bin
-            }
+
             // All records here are already scoped to this vault.
             for metadata in manager.getAllMetadata() where metadata.syncStatus != .pendingDelete {
                 if let item = try? vfs.getItem(id: metadata.fileId) { items[item.id] = item }
@@ -40,10 +51,10 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
             for id in vfs.cacheManager.getAllCachedFileIds() + Array(state.materializedIds()) {
                 if let item = try? vfs.getItem(id: id) { items[id] = item }
             }
-            // Refresh materialized directories, including removals that happened while Finder was closed.
+            // Refresh materialized directories from local database cache (background refreshed if stale)
             for id in state.materializedIds() {
                 guard let item = try? vfs.getItem(id: id), item.isDirectory else { continue }
-                if let children = try? await vfs.listDirectoryFromWebDAVAsync(directoryId: id) {
+                if let children = try? vfs.listDirectory(directoryId: id) {
                     for child in children { items[child.id] = child }
                 }
             }
@@ -53,30 +64,53 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         } else {
             let directory = enumeratedItemIdentifier == .rootContainer ? "ROOT" : enumeratedItemIdentifier.rawValue
             let children: [VirtualFileItem]
-            do { children = try await vfs.listDirectoryFromWebDAVAsync(directoryId: directory) }
-            catch { try Task.checkCancellation(); children = try vfs.listDirectory(directoryId: directory) }
+            do {
+                children = try await vfs.listDirectoryFromWebDAVAsync(directoryId: directory)
+            } catch VFSError.vaultLocked {
+                throw VFSError.vaultLocked
+            } catch VFSError.invalidPassword {
+                throw VFSError.invalidPassword
+            } catch {
+                try Task.checkCancellation()
+                children = try vfs.listDirectory(directoryId: directory)
+            }
             for child in children { items[child.id] = child }
             // Offline creates can be absent from a successful remote list. Keep them until committed.
-            for metadata in manager.getAllMetadata() where metadata.parentId == directory && metadata.syncStatus != .pendingDelete && (metadata.syncStatus.needsSync || metadata.syncStatus == .localOnly) {
-                if let child = try? vfs.getItem(id: metadata.fileId) { items[child.id] = child }
-            }
-            if directory == "ROOT" {
-                if RecycleBinConfig.isEnabled(for: vaultId) {
-                    if let bin = try? await vfs.getOrCreateRecycleBinDirectory() {
-                        items[bin.id] = bin
-                    }
-                } else if let bin = vfs.getRecycleBinDirectory() {
-                    items.removeValue(forKey: bin.id)
+            for metadata in manager.getAllMetadata() where metadata.parentId == directory && metadata.syncStatus != .pendingDelete && (metadata.syncStatus.needsSync || metadata.syncStatus == .localOnly || metadata.syncStatus.protectsLocalChanges) {
+                if let child = try? vfs.getItem(id: metadata.fileId) {
+                    items[child.id] = child
+                } else {
+                    items[metadata.fileId] = VirtualFileItem(
+                        id: metadata.fileId,
+                        name: metadata.name,
+                        isDirectory: metadata.isDirectory,
+                        size: metadata.size,
+                        modifiedAt: metadata.localModifiedAt ?? Date(),
+                        parentId: metadata.parentId,
+                        syncStatus: metadata.syncStatus,
+                        localPath: metadata.localPath,
+                        remotePath: metadata.remotePath,
+                        etag: metadata.etag
+                    )
                 }
             }
         }
-        let isBinEnabled = RecycleBinConfig.isEnabled(for: vaultId)
         return items.values.filter { item in
-            manager.getMetadata(fileId: item.id)?.syncStatus != .pendingDelete &&
-            !IgnoreRuleEngine.shared.shouldIgnore(path: item.remotePath ?? item.name, name: item.name, isDirectory: item.isDirectory, vaultId: vaultId) &&
-            (isBinEnabled || !vfs.isRecycleBinDirectory(id: item.id))
-        }.sorted { $0.id < $1.id }.map {
-            FileProviderItem(vfsItem: $0, isEncrypted: vfs.isEncrypted, cacheManager: vfs.cacheManager, syncManager: manager)
+            let isSystemJunk = item.name == ".DS_Store" || item.name.hasPrefix("._") || item.name == "Thumbs.db" || item.name == "desktop.ini" || item.name == ".thumbnails.catalog"
+            if isSystemJunk {
+                return false
+            }
+            return manager.getMetadata(fileId: item.id)?.syncStatus != .pendingDelete
+        }.sorted { $0.id < $1.id }.map { item in
+            var vfsItem = item
+            let checkPath = vfsItem.remotePath ?? vfsItem.name
+            let isIgnored = IgnoreRuleEngine.shared.shouldIgnore(path: checkPath, name: vfsItem.name, isDirectory: vfsItem.isDirectory, vaultId: vaultId)
+            let isUserExcluded = IgnoreRuleEngine.shared.isUserExcluded(vaultId: vaultId, path: vfsItem.name) ||
+                                 IgnoreRuleEngine.shared.isUserExcluded(vaultId: vaultId, path: checkPath)
+            if (isIgnored || isUserExcluded || vfsItem.name.hasSuffix(".nosync")) && vfsItem.syncStatus != .localOnly {
+                vfsItem.syncStatus = .localOnly
+            }
+            return FileProviderItem(vfsItem: vfsItem, isEncrypted: vfs.isEncrypted, cacheManager: vfs.cacheManager, syncManager: manager)
         }
     }
 

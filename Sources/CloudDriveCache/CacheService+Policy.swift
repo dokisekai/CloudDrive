@@ -22,12 +22,19 @@ extension CacheService {
             if metadataStore.get(for: parent)?.policy == .pinned { return .pinned }
             parent = (parent as NSString).deletingLastPathComponent
         }
-        return metadataStore.get(for: "ROOT")?.policy == .pinned ? .pinned : .automatic
+        return metadataStore.get(for: "ROOT")?.policy == .pinned || metadataStore.get(for: "/")?.policy == .pinned ? .pinned : .automatic
     }
 
     public func setCachePolicy(fileId: String, policy: CachePolicy) {
-        metadataStore.setPolicy(for: fileId, policy: policy)
-        metadataStore.save(immediate: true)
+        do {
+            try syncManager.withJournalCommit {
+                metadataStore.setPolicy(for: fileId, policy: policy)
+                metadataStore.save(immediate: true)
+            }
+        } catch {
+            Logger.shared.error(.cache, "Cache policy change failed: \(error)")
+            return
+        }
         Logger.shared.info(.cache, "Set cache policy: \(fileId) -> \(policy.rawValue)")
     }
 

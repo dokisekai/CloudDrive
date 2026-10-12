@@ -1,150 +1,131 @@
-//
-//  SyncService.swift
-//  CloudDriveSync
-//
-//  Copyright (c) 2026 李彦军 liyanjun@aabg.net
-//  https://github.com/dokisekai/CloudDrive
-//
-//  同步子系统统一门面服务
-//
-
 import Foundation
+import Darwin
 import CloudDriveContracts
 import CloudDriveSupport
 
 extension SyncService {
     public func syncDirectory(directoryId: String, localPath: String, remotePath: String) async throws -> [FileMetadata] {
-        guard let storageClient = getStorageClient() else {
-            throw SyncError.storageNotConfigured
-        }
-        
-        var syncedFiles: [FileMetadata] = []
-        var remoteFiles: [StorageResource] = []
-        
-        if networkMonitor.isOnline {
-            do {
-                remoteFiles = try await storageClient.listDirectory(path: remotePath)
-            } catch {
-                // An unavailable/incomplete snapshot must never mean an empty cloud.
-                throw error
+        guard let storageClient = getStorageClient() else { throw SyncError.storageNotConfigured }
+        guard networkMonitor.isOnline else { throw SyncError.networkUnavailable }
+        // Both snapshots must be complete before reconciliation can accept work.
+        let remoteFiles = try await storageClient.listDirectory(path: remotePath)
+        let localRoot = URL(fileURLWithPath: localPath)
+        let localFiles = fileManager.fileExists(atPath: localPath)
+            ? try fileManager.contentsOfDirectory(at: localRoot, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .isSymbolicLinkKey]) : []
+        var remoteMap: [String: StorageResource] = [:]
+        for resource in remoteFiles {
+            let name = resource.displayName
+            guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\\"), remoteMap[name] == nil else {
+                throw SyncError.operationFailed("Directory snapshot contains an invalid or duplicate child")
             }
-        } else {
-            throw SyncError.networkUnavailable
+            remoteMap[name] = resource
         }
-        
-        var localFiles: [URL] = []
-        if fileManager.fileExists(atPath: localPath) {
-            do {
-                localFiles = try fileManager.contentsOfDirectory(at: URL(fileURLWithPath: localPath), includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey])
-            } catch {
-                Logger.shared.warning(.sync, "Failed to fetch local files: \(error.localizedDescription)")
-            }
-        }
-        
-        let remoteFileNames = Set(remoteFiles.map { $0.displayName })
-        let localFileNames = Set(localFiles.map { $0.lastPathComponent })
-        
-        let cloudOnlyFiles = remoteFileNames.subtracting(localFileNames)
-        for fileName in cloudOnlyFiles {
-            if let resource = remoteFiles.first(where: { $0.displayName == fileName }) {
-                let fileId = "\(remotePath)/\(fileName)"
-                let metadata = FileMetadata(
-                    fileId: fileId,
-                    name: fileName,
-                    parentId: directoryId,
-                    isDirectory: resource.isDirectory,
-                    syncStatus: .cloudOnly,
-                    remotePath: resource.path,
-                    size: resource.contentLength,
-                    remoteModifiedAt: resource.lastModified,
-                    etag: resource.etag
-                )
-                updateMetadata(metadata)
-                syncedFiles.append(metadata)
-            }
-        }
-        
-        let localOnlyFiles = localFileNames.subtracting(remoteFileNames)
-        for fileName in localOnlyFiles {
-            if let fileURL = localFiles.first(where: { $0.lastPathComponent == fileName }) {
-                let fileId = "\(remotePath)/\(fileName)"
-                let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-                let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                let modifiedAt = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                
-                let metadata = FileMetadata(
-                    fileId: fileId,
-                    name: fileName,
-                    parentId: directoryId,
-                    isDirectory: isDirectory,
-                    syncStatus: .localOnly,
-                    localPath: fileURL.path,
-                    size: Int64(size),
-                    localModifiedAt: modifiedAt
-                )
-                updateMetadata(metadata)
-                syncedFiles.append(metadata)
-                
-                if networkMonitor.isOnline {
-                    let remoteFilePath = "\(remotePath)/\(fileName)"
-                    if isDirectory {
-                        addToSyncQueue(.createDirectory(directoryId: fileId, name: fileName, parentId: directoryId, remotePath: remoteFilePath))
+        let localMap = Dictionary(uniqueKeysWithValues: localFiles.map { ($0.lastPathComponent, $0) })
+        let prefix = remotePath == "/" ? "" : remotePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let parent = remotePath.hasPrefix("/") ? "/" + prefix : prefix
+        var reconciled: [FileMetadata] = []
+        // Read current metadata after network suspension, under the same journal
+        // lock as enqueue/completion. Never publish a stale whole-directory batch.
+        try withJournalCommit {
+            for name in Set(remoteMap.keys).union(localMap.keys).sorted() {
+                let fileId = parent.isEmpty || parent == "/" ? "/" + name : parent + "/" + name
+                let existing = try metadataStore.getMetadataPersistent(fileId: fileId)
+                if let existing, queue.hasPendingOperation(fileId: fileId) || Self.protectDuringReconciliation(existing.syncStatus) {
+                    reconciled.append(existing)
+                    continue
+                }
+                let remote = remoteMap[name]
+                let local = localMap[name]
+                if let local {
+                    let values = try local.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .isSymbolicLinkKey])
+                    guard values.isSymbolicLink != true else { throw SyncError.operationFailed("Refusing to synchronize a symbolic link") }
+                    var metadata = FileMetadata(fileId: fileId, name: name, parentId: directoryId,
+                        isDirectory: values.isDirectory == true, syncStatus: .localOnly,
+                        localPath: local.path, remotePath: remote?.path,
+                        size: Int64(values.fileSize ?? 0), localModifiedAt: values.contentModificationDate,
+                        remoteModifiedAt: remote?.lastModified, etag: existing?.etag, remoteETag: remote?.etag,
+                        lastSyncTime: existing?.lastSyncTime)
+                    if let remote {
+                        metadata.syncStatus = Self.reconciledStatus(local: metadata, remote: remote)
+                        // Retain the downloaded baseline until bytes are refreshed.
+                        if metadata.syncStatus == .pendingUpload && !metadata.isDirectory {
+                            let staged = try stageReconciliationUpload(local)
+                            metadata.localPath = staged.path
+                            try acceptSavePersistent(metadata: metadata, operation: .upload(fileId: fileId, localPath: staged.path, remotePath: remote.path), expectedETag: existing?.etag) {}
+                        } else { try metadataStore.updateMetadataPersistent(metadata) }
                     } else {
-                        addToSyncQueue(.upload(fileId: fileId, localPath: fileURL.path, remotePath: remoteFilePath))
-                    }
-                }
-            }
-        }
-        
-        let commonFiles = remoteFileNames.intersection(localFileNames)
-        for fileName in commonFiles {
-            if let resource = remoteFiles.first(where: { $0.displayName == fileName }),
-               let fileURL = localFiles.first(where: { $0.lastPathComponent == fileName }) {
-                let fileId = "\(remotePath)/\(fileName)"
-                let isDirectory = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-                let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                let localModifiedAt = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                
-                let existingMeta = getMetadata(fileId: fileId)
-                let lastSync = existingMeta?.lastSyncTime
-                
-                var metadata = FileMetadata(
-                    fileId: fileId,
-                    name: fileName,
-                    parentId: directoryId,
-                    isDirectory: isDirectory,
-                    syncStatus: .synced,
-                    localPath: fileURL.path,
-                    remotePath: resource.path,
-                    size: Int64(size),
-                    localModifiedAt: localModifiedAt,
-                    remoteModifiedAt: resource.lastModified,
-                    etag: resource.etag,
-                    lastSyncTime: lastSync
-                )
-                
-                let conflictType = conflictResolver.detectConflict(local: metadata, remote: resource)
-                if conflictType != .none || metadata.hasConflict() {
-                    metadata.syncStatus = .conflict
-                } else if let lastSync {
-                    if let localMod = localModifiedAt, localMod > lastSync {
+                        let operation: SyncOperation
+                        if metadata.isDirectory {
+                            operation = .createDirectory(directoryId: fileId, name: name, parentId: directoryId, remotePath: fileId)
+                        } else {
+                            let staged = try stageReconciliationUpload(local)
+                            metadata.localPath = staged.path
+                            operation = .upload(fileId: fileId, localPath: staged.path, remotePath: fileId)
+                        }
                         metadata.syncStatus = .pendingUpload
-                    } else if let remoteMod = resource.lastModified, remoteMod > lastSync {
-                        metadata.syncStatus = .cloudOnly
+                        // A missing remote object is always create-if-absent, even
+                        // when historical metadata still carries an old validator.
+                        metadata.etag = nil
+                        try acceptSavePersistent(metadata: metadata, operation: operation) {}
                     }
-                } else {
-                    if let remoteETag = resource.etag, let existingETag = existingMeta?.etag, remoteETag != existingETag {
-                        metadata.syncStatus = .conflict
-                    } else if Int64(size) != resource.contentLength {
-                        metadata.syncStatus = .conflict
-                    }
+                    reconciled.append(metadata)
+                } else if let remote {
+                    let metadata = FileMetadata(fileId: fileId, name: name, parentId: directoryId,
+                        isDirectory: remote.isDirectory, syncStatus: .cloudOnly,
+                        remotePath: remote.path, size: remote.contentLength,
+                        remoteModifiedAt: remote.lastModified, etag: nil, remoteETag: remote.etag)
+                    try metadataStore.updateMetadataPersistent(metadata)
+                    reconciled.append(metadata)
                 }
-                
-                updateMetadata(metadata)
-                syncedFiles.append(metadata)
             }
         }
-        
-        return syncedFiles
+        processSyncQueue()
+        return reconciled
+    }
+
+    static func protectDuringReconciliation(_ status: SyncStatus) -> Bool {
+        switch status {
+        case .synced, .cloudOnly: return false
+        default: return true
+        }
+    }
+
+    static func reconciledStatus(local: FileMetadata, remote: StorageResource) -> SyncStatus {
+        guard local.isDirectory == remote.isDirectory else { return .conflict }
+        let localChanged = local.lastSyncTime.map { time in local.localModifiedAt.map { $0 > time } ?? true } ?? true
+        let remoteChanged: Bool
+        if let baseline = local.etag, let revision = remote.etag { remoteChanged = baseline != revision }
+        else { remoteChanged = local.lastSyncTime.map { time in remote.lastModified.map { $0 > time } ?? true } ?? true }
+        if localChanged && remoteChanged { return .conflict }
+        if localChanged { return .pendingUpload }
+        if remoteChanged { return .cloudOnly }
+        return local.size == remote.contentLength ? .synced : .conflict
+    }
+
+    private func stageReconciliationUpload(_ source: URL) throws -> URL {
+        let directory = queue.persistenceURL.deletingLastPathComponent().appendingPathComponent("pending_uploads")
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent(UUID().uuidString)
+        do {
+            let before = try source.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            if copyfile(source.path, destination.path, nil, copyfile_flags_t(COPYFILE_CLONE)) != 0 {
+                try fileManager.copyItem(at: source, to: destination)
+            }
+            let after = try source.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            guard before.fileSize == after.fileSize, before.contentModificationDate == after.contentModificationDate else {
+                throw SyncError.operationFailed("Local content changed while preparing upload")
+            }
+            let handle = try FileHandle(forWritingTo: destination)
+            defer { try? handle.close() }
+            try handle.synchronize()
+            let fd = open(directory.path, O_RDONLY)
+            guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            defer { close(fd) }
+            guard fsync(fd) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            return destination
+        } catch {
+            try? fileManager.removeItem(at: destination)
+            throw error
+        }
     }
 }

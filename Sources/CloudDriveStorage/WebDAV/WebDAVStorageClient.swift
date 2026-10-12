@@ -14,6 +14,18 @@ import CloudDriveSupport
 
 /// WebDAV 存储客户端实现
 public class WebDAVStorageClient: StorageClient {
+    public var capabilities: StorageCapabilities {
+        StorageCapabilities(
+            supportsResumableDownload: true,
+            supportsResumableUpload: false,
+            supportsFastUpload: false,
+            supportsServerSideMove: true,
+            supportsServerSideCopy: true,
+            maxUploadFileSize: nil,
+            preferredSliceSize: nil
+        )
+    }
+    
     public var requiresETagForUpdate: Bool { true }
     public let webDAVClient: WebDAVClient
     
@@ -81,6 +93,23 @@ public class WebDAVStorageClient: StorageClient {
             throw StorageError.serverError(statusCode: code, message: "WebDAV download failed")
         }
     }
+
+    public func downloadFile(path: String, to destinationURL: URL, expectedETag: String?, maximumBytes: Int64, progress: @escaping (Double) -> Void) async throws -> String? {
+        do { return try await webDAVClient.downloadFile(path: path, to: destinationURL, expectedETag: expectedETag, maximumBytes: maximumBytes, progress: progress) }
+        catch WebDAVError.serverError(let code) { throw StorageError.serverError(statusCode: code, message: "WebDAV verification download failed") }
+    }
+
+    public func downloadRange(path: String, range: ClosedRange<Int64>) async throws -> Data {
+        try await downloadRange(path: path, range: range, expectedETag: nil)
+    }
+
+    public func downloadRange(path: String, range: ClosedRange<Int64>, expectedETag: String?) async throws -> Data {
+        do {
+            return try await webDAVClient.downloadRange(path: path, range: range, expectedETag: expectedETag)
+        } catch WebDAVError.serverError(let code) {
+            throw StorageError.serverError(statusCode: code, message: "WebDAV range download failed")
+        }
+    }
     
     public func createDirectory(path: String) async throws {
         try await webDAVClient.createDirectory(path: path)
@@ -98,6 +127,10 @@ public class WebDAVStorageClient: StorageClient {
         try await webDAVClient.move(from: sourcePath, to: destinationPath)
     }
 
+    public func moveWithRevision(from sourcePath: String, to destinationPath: String, expectedETag: String?) async throws -> String? {
+        return try await webDAVClient.moveWithRevision(from: sourcePath, to: destinationPath, expectedETag: expectedETag)
+    }
+
     public func move(from sourcePath: String, to destinationPath: String, expectedETag: String?) async throws {
         try await webDAVClient.move(from: sourcePath, to: destinationPath, expectedETag: expectedETag)
     }
@@ -106,7 +139,7 @@ public class WebDAVStorageClient: StorageClient {
         try await webDAVClient.copy(from: sourcePath, to: destinationPath)
     }
 
-    public func copy(from sourcePath: String, to destinationPath: String, expectedETag: String?) async throws {
+    public func copy(from sourcePath: String, to destinationPath: String, expectedETag: String?) async throws -> String? {
         try await webDAVClient.copy(from: sourcePath, to: destinationPath, expectedETag: expectedETag)
     }
     

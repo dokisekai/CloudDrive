@@ -28,15 +28,9 @@ extension WebDAVClient {
         request.httpBody = propfindXML.data(using: .utf8)
         
         // 添加认证
-        if let credentials = credentials {
-            let authString = "\(credentials.user!):\(credentials.password!)"
-            if let authData = authString.data(using: .utf8) {
-                let base64Auth = authData.base64EncodedString()
-                request.setValue("Basic \(base64Auth)", forHTTPHeaderField: "Authorization")
-            }
-        }
+        addAuthentication(to: &request)
         
-        let (data, response) = try await WebDAVRetryPolicy.perform { try await session.data(for: request) }
+        let (data, response) = try await WebDAVRetryPolicy.perform { try await boundedResponse(for: request) }
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw WebDAVError.invalidResponse
@@ -52,38 +46,28 @@ extension WebDAVClient {
     
     /// 检查资源是否存在（PROPFIND Depth: 0）
     public func exists(path: String) async throws -> Bool {
+        try await resource(path: path) != nil
+    }
+
+    /// A Depth: 0 response must describe exactly the requested object.
+    func resource(path: String) async throws -> WebDAVResource? {
         let url = try buildURL(for: path)
         var request = URLRequest(url: url)
         request.httpMethod = "PROPFIND"
         request.setValue("0", forHTTPHeaderField: "Depth")
         request.setValue("application/xml", forHTTPHeaderField: "Content-Type")
-        
-        let propfindXML = """
-        <?xml version="1.0" encoding="utf-8" ?>
-        <D:propfind xmlns:D="DAV:">
-            <D:prop>
-                <D:resourcetype/>
-            </D:prop>
-        </D:propfind>
-        """
-        request.httpBody = propfindXML.data(using: .utf8)
-        
-        if let credentials = credentials {
-            let authString = "\(credentials.user!):\(credentials.password!)"
-            if let authData = authString.data(using: .utf8) {
-                let base64Auth = authData.base64EncodedString()
-                request.setValue("Basic \(base64Auth)", forHTTPHeaderField: "Authorization")
-            }
-        }
-        
-        let (data, response) = try await WebDAVRetryPolicy.perform { try await session.data(for: request) }
+        request.httpBody = Data("<D:propfind xmlns:D=\"DAV:\"><D:prop><D:resourcetype/><D:getetag/><D:getcontentlength/></D:prop></D:propfind>".utf8)
+        addAuthentication(to: &request)
+        let (data, response) = try await WebDAVRetryPolicy.perform { try await boundedResponse(for: request) }
         guard let http = response as? HTTPURLResponse else { throw WebDAVError.invalidResponse }
-        if http.statusCode == 404 { return false }
+        if http.statusCode == 404 { return nil }
         guard (200...299).contains(http.statusCode) else { throw WebDAVError.serverError(http.statusCode) }
-        if http.statusCode == 207 { _ = try WebDAVXMLParser().parse(data: data, basePath: path, baseURL: baseURL) }
-        return true
+        let resources = try WebDAVXMLParser().parse(data: data, basePath: path, baseURL: baseURL, excludingSelf: false)
+        func normalize(_ path: String) -> String { path == "/" ? path : path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+        guard resources.count == 1, normalize(resources[0].path) == normalize(url.path) else { throw WebDAVError.invalidResponse }
+        return resources[0]
     }
-    
+
     /// 浏览指定路径下的子目录，并检测当前目录和子目录是否包含加密保险库
     public func browseDirectory(path: String) async throws -> (currentIsVault: Bool, folders: [RemoteFolderItem]) {
         var cleanPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -116,23 +100,34 @@ extension WebDAVClient {
         }
         
         var folders: [RemoteFolderItem] = []
-        for folder in folderResources {
-            let name = folder.displayName.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            let folderPath: String
-            if cleanPath == "/" {
-                folderPath = "/\(name)"
-            } else {
-                folderPath = "\(cleanPath)/\(name)"
+        // Bound probing tasks as well as sockets for very large collections.
+        for offset in stride(from: 0, to: folderResources.count, by: 8) {
+        try await withThrowingTaskGroup(of: RemoteFolderItem.self) { group in
+            for folder in folderResources[offset..<min(offset + 8, folderResources.count)] {
+                let name = folder.displayName.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                let folderPath: String
+                if cleanPath == "/" {
+                    folderPath = "/\(name)"
+                } else {
+                    folderPath = "\(cleanPath)/\(name)"
+                }
+                
+                group.addTask {
+                    // 快速轻量检测该子目录是否也是一个加密保险库（并发探测）
+                    let hasMK = (try? await self.exists(path: "\(folderPath)/masterkey.cryptomator")) ?? false
+                    let hasSalt = hasMK ? false : ((try? await self.exists(path: "\(folderPath)/salt")) ?? false)
+                    let isVault = hasMK || hasSalt
+                    return RemoteFolderItem(path: folderPath, name: name.isEmpty ? folderPath : name, isVault: isVault)
+                }
             }
             
-            // 快速轻量检测该子目录是否也是一个加密保险库
-            let hasMK = (try? await exists(path: "\(folderPath)/masterkey.cryptomator")) ?? false
-            let hasSalt = hasMK ? false : ((try? await exists(path: "\(folderPath)/salt")) ?? false)
-            let isVault = hasMK || hasSalt
-            
-            folders.append(RemoteFolderItem(path: folderPath, name: name.isEmpty ? folderPath : name, isVault: isVault))
+            for try await item in group {
+                folders.append(item)
+            }
         }
         
+        }
+
         // 按照名称排序，保险库置顶
         folders.sort { a, b in
             if a.isVault != b.isVault {

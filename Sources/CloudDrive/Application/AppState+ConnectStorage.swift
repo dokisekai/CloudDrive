@@ -14,26 +14,44 @@ extension AppState {
         isAutoMount: Bool = true,
         bookmarkData: Data? = nil
     ) async throws {
+        guard configuration.type.isAvailable else {
+            throw StorageError.notSupported("Only WebDAV is enabled")
+        }
         print("🔗 AppState: Unified storage connection: [\(configuration.type.displayName)] Mode: \(mode.rawValue)")
         
         let vaultId = UUID().uuidString
 
         print("🆔 AppState: Generated vault ID: \(vaultId)")
         
+        // 若为百度网盘存储，将当前 default 模板凭据克隆至新生成的 vaultId，避免重复刷新消耗 token
+        if case .baidupan(let panConfig) = configuration {
+            let tokenStore = BaiduPanTokenStore()
+            tokenStore.cloneCredentials(from: "default", to: vaultId)
+            if !panConfig.accessToken.isEmpty {
+                try? tokenStore.saveAuthorized(
+                    vaultID: vaultId,
+                    appID: panConfig.appID,
+                    clientID: panConfig.appKey,
+                    accessToken: panConfig.accessToken,
+                    refreshToken: panConfig.refreshToken,
+                    expiresIn: 25 * 86400
+                )
+                try? tokenStore.saveAuthorized(
+                    vaultID: "default",
+                    appID: panConfig.appID,
+                    clientID: panConfig.appKey,
+                    accessToken: panConfig.accessToken,
+                    refreshToken: panConfig.refreshToken,
+                    expiresIn: 25 * 86400
+                )
+            }
+        }
+
         // 配置 VFS 与 SyncManager
         vfs.configureStorage(configuration: configuration)
         
         // 提取并保存密码/密钥
-        let secret: String? = {
-            switch configuration {
-            case .webdav(let c): return c.password
-            case .s3(let c): return c.secretKey
-            case .smb(let c): return c.password
-            case .ftp(let c): return c.password
-            case .pan123(let c): return c.clientSecret
-            case .local: return nil
-            }
-        }()
+        let secret: String? = configuration.secret
         
         if let sec = secret {
             saveWebDAVPassword(sec, for: vaultId)
@@ -44,6 +62,8 @@ extension AppState {
         saveCredentialsToAppGroup(vaultId: vaultId, webdavPassword: secret, vaultPassword: vaultPassword)
         
         let cleanRemotePath = remotePath.isEmpty ? "/" : remotePath
+        let encryptedTargetVaultPath = "/" + (cleanRemotePath + "/" + name).split(separator: "/").joined(separator: "/")
+
         switch mode {
         case .directWebDAV:
             try await vfs.initializeDirectMappingVault(vaultId: vaultId, storagePath: cleanRemotePath)
@@ -51,7 +71,7 @@ extension AppState {
             guard let vp = vaultPassword, !vp.isEmpty else {
                 throw NSError(domain: "CloudDrive", code: -1, userInfo: [NSLocalizedDescriptionKey: L("err_set_vault_password")])
             }
-            _ = try await vfs.initializeVault(name: name, password: vp, storagePath: cleanRemotePath, vaultId: vaultId)
+            _ = try await vfs.initializeVault(name: name, password: vp, storagePath: encryptedTargetVaultPath, vaultId: vaultId)
         case .openExisting:
             guard let vp = vaultPassword, !vp.isEmpty else {
                 throw NSError(domain: "CloudDrive", code: -1, userInfo: [NSLocalizedDescriptionKey: L("err_enter_vault_password")])
@@ -67,7 +87,7 @@ extension AppState {
         }
         
         let persistedPath = mode == .createEncrypted
-            ? "/" + (cleanRemotePath + "/" + name).split(separator: "/").joined(separator: "/")
+            ? encryptedTargetVaultPath
             : cleanRemotePath
         let vaultInfo = VaultInfo(
             id: vaultId,

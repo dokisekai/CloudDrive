@@ -1,5 +1,10 @@
 # CloudDrive Usage & Verification Guide
 
+> Only WebDAV is enabled. Historical configurations for other protocols will not connect or mount automatically. Configure the final WebDAV endpoint; redirects are rejected.
+
+> **Native macOS File Provider for Cryptomator + WebDAV — encrypted files appear directly in Finder and download only when opened. Free and open source.**  
+> 🔗 **GitHub**: [https://github.com/dokisekai/CloudDrive](https://github.com/dokisekai/CloudDrive)
+
 [English](usage-guide.md) | [简体中文](usage-guide_CN.md)
 
 This document provides a comprehensive guide on building, installing, configuring, and verifying **CloudDrive** on macOS, specifically tailored for testing Apple File Provider integration with Cryptomator-compatible vaults.
@@ -29,18 +34,35 @@ This document provides a comprehensive guide on building, installing, configurin
 ## 2. Prerequisites & Environment
 
 - **Operating System**: **macOS 15.0 (Sequoia) or later**.
-- **Architecture**: Apple Silicon (M1/M2/M3/M4) or Intel (x86_64).
-- **Tools**: Xcode 16+ (with Command Line Tools installed).
-- **Code Signing**: **No paid Apple Developer account is required**. The automated build script handles local code signing and sandboxed App Group entitlements automatically (using ad-hoc signing `-` as fallback).
+- **Architecture**: **Universal 2 Architecture** (native support for both Apple Silicon `arm64` and Intel `x86_64`).
+- **Tools**: Xcode 16+ (only required if building from source; not needed for pre-built packages).
+- **Code Signing**: **No paid Apple Developer account is required**. The activation and install scripts handle local code signing and sandboxed App Group entitlements automatically (using ad-hoc signing `-` as fallback).
 
 ---
 
-## 3. One-Click Build & Installation
+## 3. Installation & Activation
+
+### 3.1 Option A: Pre-built Package Activation (No Xcode Required, Recommended)
+
+For users downloading the release archive (`CloudDrive-macOS-Release.zip`):
+> The release package contains native universal binaries for both Apple Silicon and Intel Macs.
+
+1. Unzip and drag `CloudDrive.app` into `/Applications`;
+2. Run the bundled activation script in Terminal:
+   ```bash
+   bash activate.sh
+   # Or from the repository: ./scripts/activate.sh
+   ```
+The script clears Gatekeeper quarantine flags, signs components with local App Group sandbox entitlements, registers the File Provider extension, and launches the app in seconds.
+
+### 3.2 Option B: Build & Install from Source (For Developers with Xcode 16+)
 
 You can build, sign, and install the complete app and its File Provider system extension with a single script:
 
 ```bash
 ./scripts/install.sh
+# To build a Universal (arm64 + x86_64) binary:
+# ./scripts/install.sh --universal
 ```
 
 ### What `install.sh` does automatically:
@@ -52,6 +74,11 @@ You can build, sign, and install the complete app and its File Provider system e
 6. Copies the bundle to `/Applications/CloudDrive.app`;
 7. Registers the extension via `pluginkit` and refreshes `fileproviderd` and Finder;
 8. Launches `/Applications/CloudDrive.app`.
+
+> **Distributor Note**: To build and export a universal release zip for distribution:
+> ```bash
+> ./scripts/package.sh
+> ```
 
 ---
 
@@ -96,6 +123,16 @@ If you already have a vault created by Cryptomator official desktop or mobile ap
 2. Provide your WebDAV server URL and point to the folder containing `vault.cryptomator`;
 3. Enter the existing master passphrase;
 4. Click **"Unlock & Mount"**. The files will be instantly browsable in Finder.
+
+### 5.3 Advanced Setup: Bridging Any Cloud Storage via Alist + Cryptomator
+
+[Alist](https://github.com/alist-org/alist) is a unified file aggregator capable of bridging 30+ storage backends (OneDrive, Google Drive, Baidu, Quark, 115, PikPak, Aliyun Drive, S3, etc.) into standard WebDAV endpoints.
+
+By pairing **CloudDrive + Alist + Cryptomator**:
+1. Mount your cloud storage providers into Alist;
+2. Point CloudDrive to Alist's local/remote WebDAV endpoint (e.g. `http://localhost:5244/dav/your-cloud-path`);
+3. Initialize or unlock an end-to-end encrypted Cryptomator vault on top of it;
+4. **Enjoy total privacy and native performance**: Files are encrypted with AES-256-GCM before leaving your Mac. No cloud provider can inspect filenames or data, and multi-terabyte libraries stream into Finder on-demand without third-party bloated apps.
 
 ---
 

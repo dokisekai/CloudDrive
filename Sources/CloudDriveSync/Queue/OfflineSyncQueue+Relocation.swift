@@ -9,6 +9,8 @@ extension OfflineSyncQueue {
             try conn.withTransaction {
                 let items = try allItemsPersistent()
                 var successors: [SyncQueueItem] = []
+                var rewritten: [SyncQueueItem] = []
+                var affectedFileIds: Set<String> = [oldFileId, newFileId]
                 let oldPrefix = oldFileId.hasSuffix("/") ? oldFileId : oldFileId + "/"
                 let newPrefix = newFileId.hasSuffix("/") ? newFileId : newFileId + "/"
                 
@@ -32,7 +34,8 @@ extension OfflineSyncQueue {
                     var updated = item
                     if fId == oldFileId {
                         updated.operation = Self.rewrite(item.operation, oldId: oldFileId, newId: newFileId, remotePath: newRemotePath, name: newName, parentId: newParentId)
-                        try insertItemInternal(updated)
+                        rewritten.append(updated)
+                        affectedFileIds.insert(fId)
                     } else if fId.hasPrefix(oldPrefix) {
                         // Cascading update for descendants in directory move
                         let subSuffix = String(fId.dropFirst(oldPrefix.count))
@@ -40,9 +43,15 @@ extension OfflineSyncQueue {
                         let newChildRemotePath = (item.operation.remotePath != nil) ? (newPrefix + subSuffix) : newRemotePath
                         let childParent = (item.operation.parentId == oldFileId) ? newFileId : (item.operation.parentId.map { Self.replacePrefix($0, oldPrefix, newPrefix) } ?? newFileId)
                         updated.operation = Self.rewriteChild(item.operation, newId: newChildId, newRemotePath: newChildRemotePath, newParentId: childParent)
-                        try insertItemInternal(updated)
+                        rewritten.append(updated)
+                        affectedFileIds.insert(fId)
+                    } else if item.operation.parentId == oldFileId {
+                        updated.operation = Self.rewriteChild(item.operation, newId: fId, newRemotePath: item.operation.remotePath ?? newRemotePath, newParentId: newFileId)
+                        rewritten.append(updated)
+                        affectedFileIds.insert(fId)
                     }
                 }
+                try persistBatchItems(rewritten, affectedFileIds: affectedFileIds)
                 for successor in successors {
                     try insertItemInternal(successor)
                 }

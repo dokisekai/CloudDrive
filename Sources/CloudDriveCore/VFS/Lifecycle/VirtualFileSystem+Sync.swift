@@ -1,5 +1,7 @@
 import Foundation
 import CryptomatorCryptoLib
+import CloudDriveSupport
+import CloudDriveContracts
 
 extension VirtualFileSystem {
     public func getNetworkStatus() -> NetworkStatus {
@@ -29,11 +31,24 @@ extension VirtualFileSystem {
         }
     }
 
+    public func deleteRemoteItem(remotePath: String, directoryId: String?, expectedETag: String?) async throws {
+        guard let client = storageClient else { throw VFSError.storageNotConfigured }
+        if let directoryId, isEncrypted {
+            guard let format = cryptomatorFormat else { throw VFSError.vaultLocked }
+            try await format.deleteItem(remotePath: remotePath, dirIdData: format.dirIdData(from: directoryId), expectedETag: expectedETag)
+        } else {
+            let revision = try StorageContentVerification.mutationETag(expectedETag, required: client.requiresETagForUpdate)
+            // A long-name file deletes only contents.c9r; the wrapper is retained.
+            try await client.delete(path: remotePath, expectedETag: revision)
+        }
+    }
+
     public func reconcileOfflineItem(oldId: String, item: VirtualFileItem) {
         guard oldId != item.id else { return }
         if item.isDirectory { try? database.deleteDirectory(id: oldId) }
         else { try? database.deleteFile(id: oldId) }
         try? cacheManager.moveCache(from: oldId, to: item.id)
+        ItemAliasStore.shared.recordAlias(from: oldId, to: item.id)
         syncManager.moveMetadata(from: oldId, to: item.id, newParentId: item.parentId,
             newName: item.name, newRemotePath: item.remotePath ?? item.id, fallbackStatus: .pendingUpload)
     }

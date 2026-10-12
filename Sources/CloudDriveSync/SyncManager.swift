@@ -40,6 +40,14 @@ public class SyncManager {
         self.service = service
     }
     
+    public func acceptSavePersistent(metadata: FileMetadata, operation: SyncOperation?, expectedETag: String? = nil, validation: () throws -> Void) throws {
+        try service.acceptSavePersistent(metadata: metadata, operation: operation, expectedETag: expectedETag, validation: validation)
+    }
+
+    public func withJournalCommit<Result>(_ action: () throws -> Result) throws -> Result {
+        try service.withJournalCommit(action)
+    }
+
     // MARK: - 配置
     
     public func configure(storageClient: StorageClient, vfs: (any SyncVaultAccess)? = nil) {
@@ -62,10 +70,22 @@ public class SyncManager {
         service.updateMetadata(metadata)
     }
 
+    public func updateMetadataBatch(_ items: [FileMetadata]) {
+        service.updateMetadataBatch(items)
+    }
+
     public func updateMetadataPersistent(_ metadata: FileMetadata) throws {
         try service.metadataStore.updateMetadataPersistent(metadata)
     }
+
+    public func updateMetadataBatchPersistent(_ items: [FileMetadata]) throws {
+        try service.metadataStore.updateMetadataBatch(items)
+    }
     
+    public func getMetadataPersistent(fileId: String) throws -> FileMetadata? {
+        try service.metadataStore.getMetadataPersistent(fileId: fileId)
+    }
+
     public func getMetadata(fileId: String) -> FileMetadata? {
         return service.getMetadata(fileId: fileId)
     }
@@ -126,8 +146,8 @@ public class SyncManager {
         service.addToSyncQueue(operation)
     }
 
-    public func enqueuePersistent(_ operation: SyncOperation, startProcessing: Bool = true) throws {
-        try service.enqueuePersistent(operation, startProcessing: startProcessing)
+    public func enqueuePersistent(_ operation: SyncOperation, startProcessing: Bool = true, expectedETag: String? = nil) throws {
+        try service.enqueuePersistent(operation, startProcessing: startProcessing, expectedETag: expectedETag)
     }
 
     public func retryFailedOperations() {
@@ -161,6 +181,14 @@ public class SyncManager {
     
     public func processSyncQueue() {
         service.processSyncQueue()
+    }
+
+    public func pauseSyncQueue() {
+        service.pauseSyncQueue()
+    }
+
+    public func recoverQueueOnUnlock() {
+        service.recoverQueueOnUnlock()
     }
     
     public func getSyncQueueCount() -> Int {

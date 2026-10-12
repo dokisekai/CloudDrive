@@ -2,6 +2,7 @@ import Foundation
 import FileProvider
 import UniformTypeIdentifiers
 import CloudDriveCore
+import CloudDriveSupport
 
 /// Resolves identifiers using VFS reads and pending local metadata.
 struct FileProviderItemLookup {
@@ -74,6 +75,12 @@ struct FileProviderItemLookup {
                     syncStatus: meta.syncStatus,
                     remotePath: meta.remotePath
                 )
+            }
+            
+            // 5. Fallback: check ItemAliasStore for renamed/moved item transitions
+            let resolvedId = ItemAliasStore.shared.resolve(identifier)
+            if resolvedId != identifier {
+                return try find(identifier: resolvedId, in: directoryId)
             }
             
             throw NSFileProviderError(.noSuchItem)

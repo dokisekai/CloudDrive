@@ -67,6 +67,11 @@ public final class IgnoreRuleEngine {
         
         // Office temporary lock files
         IgnoreRule(pattern: "~$*", source: .builtin, comment: "Microsoft Office temporary lock file"),
+        
+        // 同步排除规则 (iCloud 规范)
+        IgnoreRule(pattern: "*.nosync", source: .builtin, comment: "排除同步的文件 (iCloud 规范)"),
+        IgnoreRule(pattern: "*.nosync/", source: .builtin, comment: "排除同步的目录 (iCloud 规范)"),
+        IgnoreRule(pattern: ".nosync", source: .builtin, comment: "排除同步标记文件"),
     ]
     
     // MARK: - 开发者常用预设模板

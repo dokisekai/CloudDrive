@@ -1,5 +1,11 @@
 # CloudDrive 使用与操作指南 (Usage Guide)
 
+> 当前版本仅启用 WebDAV；其他协议的历史配置不会连接或自动挂载。请填写最终 WebDAV 地址，重定向响应将被拒绝。
+
+> **Native macOS File Provider for Cryptomator + WebDAV — encrypted files appear directly in Finder and download only when opened. Free and open source.**  
+> **面向 Cryptomator + WebDAV 的原生 macOS File Provider — 加密文件直接在访达 (Finder) 中显示，仅在打开时按需流式下载。完全免费且开源。**  
+> 🔗 **项目开源地址 (GitHub)**: [https://github.com/dokisekai/CloudDrive](https://github.com/dokisekai/CloudDrive)
+
 [English](usage-guide.md) | [简体中文](usage-guide_CN.md)
 
 本文档介绍 **CloudDrive** 的核心功能、支持状态、配置步骤以及日常使用方法。
@@ -18,7 +24,7 @@
 | 模块 / 能力 | 支持状态 | 说明 |
 | :--- | :---: | :--- |
 | **WebDAV 存储源** | ✅ 生产就绪 | 严格遵循 RFC 4918 规范，支持 Nextcloud、Alist、Synology、Nginx 等主流 WebDAV 服务。 |
-| **Cryptomator 加密** | ✅ 生产就绪 | 遵循 Cryptomator 格式规范（AES-256-GCM、Scrypt 密钥派生、文件名加密与目录打散），可与官方客户端跨平台互通。 |
+| **Cryptomator 官方标准** | ✅ 100% 完全兼容 | 严格实现 Vault Format 7/8/9 官方规范（AES-256-GCM、Scrypt、Base32 文件名加密与目录打散），与官方桌面端及移动端双向读写完全互通。 |
 | **按需下载 (Hydration)** | ✅ 生产就绪 | 利用 macOS File Provider 原生 Dataless Files，初次仅拉取目录树元数据，按需流式下载，节省本地磁盘。 |
 | **不可变代次与防冲突** | ✅ 生产就绪 | 每次编辑生成不可变代次，写入携带 ETag 条件头（`If-Match` / `If-None-Match`），出现版本竞争自动分叉保留副本。 |
 | **缓存管理与空间释放** | ✅ 生产就绪 | 支持右键“移除下载内容”释放本地磁盘占用；具备 LRU 缓存租约防误删机制。 |
@@ -29,21 +35,36 @@
 ## 2. 准备工作与系统要求
 
 - **操作系统**：**macOS 15.0 (Sequoia) 或更高版本**。
-- **硬件平台**：Apple Silicon (M1/M2/M3/M4) 及 Intel (x86_64) Mac。
-- **开发工具**：Xcode 16+（包含 Command Line Tools）。
-- **代码签名**：**无需付费 Apple 开发者账号**。构建脚本会自动适配个人证书或回退到 Ad-hoc 自签名 (`-`) 并正确绑定 App Group 沙盒权限。
+- **硬件平台**：**Universal 2 通用二进制架构**，原生支持 Apple Silicon (M1/M2/M3/M4) 及 Intel (x86_64) Mac。
+- **开发工具**：Xcode 16+（仅源码构建需要；使用预编译包则无需安装）。
+- **代码签名**：**无需付费 Apple 开发者账号**。激活与构建脚本会自动适配个人证书或回退到 Ad-hoc 自签名 (`-`) 并正确绑定 App Group 沙盒权限。
 - **权限要求**：构建与安装需要管理员权限（向 `/Applications` 写入并注册系统级 `FileProvider` 扩展）。
 
 ---
 
 ## 3. 安装与首次配置
 
-### 3.1 一键构建与安装
+### 3.1 方案 A：预编译版本本地激活（免 Xcode，推荐普通用户）
+
+适用于直接下载 Releases 预编译包（`CloudDrive-macOS-Release.zip`）的用户：
+> 官方分发包已打包为包含 `arm64` 与 `x86_64` 的通用二进制，任何 Mac 设备均可原生流畅运行。
+
+1. 解压并将 `CloudDrive.app` 拷贝到 `/Applications` 目录；
+2. 运行本地激活脚本：
+   ```bash
+   bash activate.sh
+   # 或者在仓库内运行：./scripts/activate.sh
+   ```
+脚本将在 2 秒内自动清除下载隔离标记（解决“已损坏，移到废纸篓”问题），就地执行本机 Ad-hoc 签名并注入 App Group 沙盒特权，完成系统扩展注册。
+
+### 3.2 方案 B：源码一键构建与安装（适合开发者，需 Xcode 16+）
 
 在仓库根目录下运行自动化构建与注册脚本：
 
 ```bash
 ./scripts/install.sh
+# 如需编译 Universal (arm64 + x86_64) 通用版：
+# ./scripts/install.sh --universal
 ```
 
 脚本将自动执行以下操作：
@@ -52,6 +73,12 @@
 3. 构建主程序 `CloudDrive.app` 与核心扩展 `CloudDriveFileProvider.appex`；
 4. 完成本地代码签名与权限沙盒（App Sandbox + App Group）绑定；
 5. 安装至 `/Applications/CloudDrive.app` 并注册到系统的 `fileproviderd` 服务。
+
+> **发布者提示**：若需要生成面向其他无 Xcode 用户的分发包，可在本机运行：
+> ```bash
+> ./scripts/package.sh
+> ```
+> 构建产物将打包为 `build/CloudDrive-macOS-Release.zip`，内含 `CloudDrive.app` 与自包含激活脚本。
 
 ---
 
@@ -93,6 +120,23 @@
 1. 点击 **“添加保险库”**，模式选择 **“WebDAV 直连挂载”**。
 2. 输入 WebDAV 服务器地址与账号密码，指定目标根目录。
 3. 点击 **“挂载”** 即可直接在 Finder 中浏览与同步远端原生文件。
+
+---
+
+### 4.4 场景四（强烈推荐）：搭配 Alist 实现“全网盘 + Cryptomator 终极体验”
+
+[Alist](https://github.com/alist-org/alist) 是一款强大的聚合文件列表工具，可将数十种主流网盘（百度网盘、夸克网盘、阿里云盘、115、OneDrive、Google Drive、PikPak、天翼云等）统一映射为标准的 WebDAV 接口。
+
+通过 **CloudDrive + Alist + Cryptomator** 组合，即可实现全网盘的“原生体验 + 零知识加密”：
+1. **在 Alist 中挂载目标网盘**（例如将百度网盘挂载到 `/baidu`，或将阿里云盘挂载到 `/aliyun`）；
+2. **在 CloudDrive 中创建加密保险库**：
+   - WebDAV 地址填写 Alist 的 WebDAV 端点（通常为 `http://localhost:5244/dav/` 或您的 NAS 地址）；
+   - 输入 Alist 的账号密码；
+   - 远端路径指向对应网盘目录（如 `/aliyun/SecureVault`）；
+3. **享受极致体验**：
+   - **隐私绝对可控**：数据在离开 Mac 本机前已完成 AES-256-GCM 加密，网盘服务商只能看到密文切片，无法扫描或封禁敏感文件；
+   - **免装臃肿客户端**：无需安装各大网盘的官方臃肿客户端，全部通过原生访达（Finder）统一管理；
+   - **零本地硬盘负担**：数 TB 文件随点随看，流式按需物化，关闭即可释放空间。
 
 ---
 

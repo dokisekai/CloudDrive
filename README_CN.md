@@ -1,8 +1,12 @@
 # CloudDrive
 
+> **Native macOS File Provider for Cryptomator + WebDAV — encrypted files appear directly in Finder and download only when opened. Free and open source.**  
+> **面向 Cryptomator + WebDAV 的原生 macOS File Provider — 加密文件直接在访达 (Finder) 中显示，仅在打开时按需流式下载。完全免费且开源。**  
+> 🔗 **项目开源地址 (GitHub)**: [https://github.com/dokisekai/CloudDrive](https://github.com/dokisekai/CloudDrive)
+
 [English](README.md) | [简体中文](README_CN.md)
 
-原生 macOS 云存储客户端，基于 Apple File Provider 现代框架构建，无须内核扩展 (No KEXT) 或第三方 FUSE，将远端云存储以原生驱动器的方式无缝挂载至访达 (Finder)。
+基于 Apple 现代 File Provider 扩展架构（`NSFileProviderReplicatedExtension`）构建，无须内核扩展 (No KEXT) 或第三方 FUSE，让远端 WebDAV 与 Cryptomator 端到端零知识加密库以原生驱动器的方式无缝融入 macOS 访达生态。
 
 ---
 
@@ -11,12 +15,19 @@
 > [!NOTE]
 > **当前可用性说明**：
 > - **已验证并生产就绪**：**WebDAV** 协议存储接入、**Cryptomator 格式端到端加密保险库**、**原生 Finder 按需下载 (Hydration)**、**事务级双向同步机制**。
-> - **模块化演进中**：Amazon S3、SMB/CIFS、FTP 协议目前处于驱动骨架与分层演进阶段，当前推荐并唯一通过完整测试的协议为 **WebDAV**。
+> - **仅启用 WebDAV**：S3、SMB/CIFS、FTP、123 云盘及本地文件夹入口和连接均已停用。历史配置保留，但不会自动挂载。
 
 ### 核心特性
 
-- 🛡️ **端到端零知识加密**：采用行业标准的 Cryptomator 格式（AES-256-GCM 数据加密、Scrypt 强抗暴力破解密钥派生、文件名加密与目录打散），可与 Cryptomator 官方客户端跨平台互通。
-- ☁️ **原生按需下载 (Dataless Files)**：初始挂载仅拉取文件目录树元数据，不占用本地磁盘；双击或调用时流式即时物化，支持随时右键“移除下载内容”释放本地空间。
+- 🛡️ **100% 完全兼容 Cryptomator 官方标准**：
+  - **双向无缝互通**：完美支持直接打开由 Cryptomator 官方桌面端（macOS/Windows/Linux）或移动端（iOS/Android）创建的既有保险库；在 CloudDrive 中创建的保险库亦可随时被 Cryptomator 官方应用解锁访问，两端完全兼容、任意无缝切换。
+  - **严格遵循官方密码学规范**：完整实现 Vault Format 7/8 规范（AES-256-GCM 认证数据加密、Scrypt 强抗暴力破解密钥派生、RFC 4648 Base32 文件名加密与长文件名转义、`d/` 顶层目录两级打散与 `dir.c9r` 真实路径映射）。
+  - **纯 Swift 现代架构**：直接基于官方推荐的 `cryptolib-swift` 原生库构建，无须 Java 虚拟机，告别内存泄露与高开销。
+- 🌐 **黄金搭档：Alist + Cryptomator + CloudDrive = 全网盘原生加密神器**：
+  - **聚合万盘**：搭配 [Alist](https://github.com/alist-org/alist) 可轻松将百度网盘、夸克网盘、阿里云盘、115网盘、OneDrive、Google Drive、PikPak、天翼云等数十种云盘聚合转换为标准 WebDAV。
+  - **零知识隐私加固**：在任意网盘上直接架设 Cryptomator 端到端零知识加密保险库，云盘服务商与第三方只能看到被加密打散的密文块，无法窥探任何真实文件名与文件内容。
+  - **极速按需加载**：动辄几 TB 的云端加密文件直接在访达中以原生目录呈现，双击即时流式加载，右键随时释放本地存储，告别臃肿且侵入性强的各网盘官方客户端。
+- ☁️ **原生按需下载 (Dataless Files)**：初始挂载仅拉取文件目录树元数据，不占用本地磁盘；双击或调用时流式即时物化，支持随时右键“移除下载内容”释放本地空间。解决 Cryptomator 官方在 macOS 上缺乏原生 File Provider 集成（[#1590](https://github.com/cryptomator/cryptomator/issues/1590)）的核心痛点。
 - 🔒 **坚固的数据安全与防冲突机制**：
   - **不可变代次**：编辑先落盘至暂存代次，再入 SQLite WAL 事务，杜绝在途竞态；
   - **条件写入**：上传携带 `If-Match` / `If-None-Match`，遇到云端版本竞争（HTTP 412）自动分叉副本，绝不静默覆盖；
@@ -31,17 +42,29 @@
 
 ### 系统要求
 - **操作系统**：**macOS 15.0 (Sequoia) 或更高版本**（基于现代 File Provider 扩展架构构建）。
-- **硬件平台**：Apple Silicon (M1/M2/M3/M4) 或 Intel (x86_64) Mac。
-- **开发工具**：Xcode 16+（包含 Command Line Tools）。
+- **硬件平台**：**Universal 通用架构**（原生支持 Apple Silicon M1/M2/M3/M4 与 Intel x86_64 Mac）。
+- **开发工具**：Xcode 16+（仅源码编译需要，使用预编译包无需安装）。
 
-### 1. 一键构建与安装（自动代码签名）
+### 1. 安装与激活
 
-**无需付费的 Apple 开发者账号！任何人克隆仓库即可直接在本地编译使用。**
+无论您是普通用户还是开发者，均**无需付费的 Apple 开发者账号**：
 
-在仓库根目录执行：
+#### 选项 A：使用预编译版本（免装 Xcode，推荐普通用户）
+> 官方 Release 预编译包已采用 **Universal 2 通用二进制**（内置 `arm64` 与 `x86_64` 原生架构，适配所有 Mac）。
 
+1. 从 Releases 下载 `CloudDrive-macOS-Release.zip` 解压并将 `CloudDrive.app` 移动至 `/Applications`；
+2. 运行解压包附带的本地激活脚本（清除隔离属性并自动绑定本机沙盒与 Finder 权限）：
+   ```bash
+   bash activate.sh
+   # 或者在克隆仓库中运行：./scripts/activate.sh
+   ```
+
+#### 选项 B：从源码一键构建与安装（适合开发者，需 Xcode 16+）
+在仓库根目录执行（默认按本机架构编译，也可传入 `--universal` 编译通用版）：
 ```bash
 ./scripts/install.sh
+# 如需编译 Universal (arm64 + x86_64) 通用二进制：
+# ./scripts/install.sh --universal
 ```
 
 **脚本自动完成的全套签名与部署流程：**
@@ -75,6 +98,29 @@
 5. 设置保险库名称与加密主密码；
 6. 点击 **“创建并解锁”**，虚拟磁盘将立刻出现在 Finder 侧边栏的“位置”中。
 
+### 4. 一键卸载与数据/缓存彻底清理 (Reset & Uninstall)
+
+如需彻底卸载 CloudDrive 或清空所有本地缓存与配置以重置应用，可运行：
+
+```bash
+./scripts/uninstall.sh
+```
+
+**支持的常用选项：**
+- `./scripts/uninstall.sh --dry-run`：安全预览模式，仅列出将要清理的项目而不做实际删除；
+- `./scripts/uninstall.sh --keep-app`：**一键重置模式**，保留 `/Applications/CloudDrive.app`，仅清空所有本地缓存、挂载磁盘、数据库、配置文件与钥匙串密码；
+- `./scripts/uninstall.sh --dev`：同时清理本地 Xcode DerivedData 编译缓存与 build 产物；
+- `./scripts/uninstall.sh -y`：跳过交互确认，自动执行彻底清理。
+
+**清理覆盖范围：**
+1. 终止所有运行中的主程序与 FileProvider 扩展进程；
+2. 注销 PlugInKit 系统扩展注册与 LaunchServices 关联；
+3. 清理 App Group (`group.net.aabg.CloudDrive`) 核心缓存、VFS 数据库、缩略图与回收站快照；
+4. 清理沙盒容器 (`~/Library/Containers`)、Application Scripts 与 Application Support；
+5. 重置 UserDefaults 偏好设置域与 HTTP/WebKit 存储；
+6. 从 macOS Keychain 安全抹除保存的保险库与存储凭据；
+7. 重置 TCC 隐私授权并重启 fileproviderd & Finder，彻底消除侧边栏幽灵磁盘。
+
 ---
 
 ## 项目结构
@@ -84,7 +130,7 @@ Sources/
   CloudDrive/              SwiftUI 主程序与菜单栏交互
   CloudDriveCore/          核心业务层与统一门面
   CloudDriveFileProvider/  macOS File Provider 系统扩展 (Finder 挂载核心)
-  CloudDriveStorage/       多协议存储驱动 (WebDAV 生产就绪 / S3, SMB, FTP)
+  CloudDriveStorage/       存储驱动 (仅启用 WebDAV，保留历史类型兼容)
   CloudDriveCrypto/        Cryptomator 兼容端到端加密驱动 (AES-GCM + Scrypt)
   CloudDrivePersistence/   SQLite WAL 状态机与元数据持久化
   CloudDriveCache/         两级缓存管理、不可变 Payload 暂存与租约驱逐
@@ -96,7 +142,10 @@ Sources/
 Tests/
   CloudDriveCoreTests/     核心同步内核与单元测试套件
 scripts/
-  install.sh              一键依赖处理、构建、签名与安装
+  activate.sh             预编译包本地激活与权限重签名 (免 Xcode)
+  install.sh              源码一键依赖处理、构建、签名与安装
+  uninstall.sh            一键彻底卸载、清理应用缓存、配置与钥匙串凭据
+  package.sh              Release 通用双架构分发包打包脚本
   test.sh                 依赖准备与集成测试运行
   patches/                第三方开源库必要适配补丁
 docs/

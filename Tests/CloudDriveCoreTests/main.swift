@@ -21,6 +21,7 @@ func runTests() async throws {
             failed += 1
         }
     }
+    try await runBaiduPanRegressions()
     
     // 1. VFSEncryption Test
     do {
@@ -550,16 +551,16 @@ func runTests() async throws {
         assert(webdavClient is WebDAVStorageClient, "Factory creates WebDAVStorageClient")
         
         let s3Client = StorageClientFactory.createClient(configuration: s3EnumConfig)
-        assert(s3Client is S3StorageClient, "Factory creates S3StorageClient")
+        assert(!(s3Client is WebDAVStorageClient), "Factory creates disabled non-WebDAV client for S3")
         
         let smbClient = StorageClientFactory.createClient(configuration: smbEnumConfig)
-        assert(smbClient is SMBStorageClient, "Factory creates SMBStorageClient")
+        assert(!(smbClient is WebDAVStorageClient), "Factory creates disabled non-WebDAV client for SMB")
         
         let ftpClient = StorageClientFactory.createClient(configuration: ftpEnumConfig)
-        assert(ftpClient is FTPStorageClient, "Factory creates FTPStorageClient")
+        assert(!(ftpClient is WebDAVStorageClient), "Factory creates disabled non-WebDAV client for FTP")
         
         let localClient = StorageClientFactory.createClient(configuration: .local(localConfig))
-        assert(localClient is LocalStorageClient, "Factory creates LocalStorageClient")
+        assert(!(localClient is WebDAVStorageClient), "Factory creates disabled non-WebDAV client for Local")
         
         // 8.3 VaultInfo Multi-Protocol & Backward Compatibility
         let s3Vault = VaultInfo(
@@ -593,42 +594,24 @@ func runTests() async throws {
         assert(legacyVault.storageType == .webdav, "Legacy vault without storageType defaults to .webdav")
         assert(!legacyVault.isLocal, "Legacy WebDAV vault correctly recognized as non-local")
         
-        // 8.4 S3 Protocol Unit Checks
-        if let s3Instance = s3Client as? S3StorageClient {
-            assert(s3Instance.config.bucket == "test-bucket", "S3StorageClient config bucket matches")
-            let existsRoot = try await s3Instance.exists(path: "/")
-            assert(existsRoot, "S3StorageClient exists on root path returns true")
-        }
+        // 8.4 Non-WebDAV Protocol Operation Rejection Checks
+        var s3Rejected = false
+        do { _ = try await s3Client.exists(path: "/") } catch StorageError.notSupported { s3Rejected = true } catch {}
+        assert(s3Rejected, "S3 operations correctly rejected when WebDAV-only enabled")
+
+        var smbRejected = false
+        do { _ = try await smbClient.listDirectory(path: "/") } catch StorageError.notSupported { smbRejected = true } catch {}
+        assert(smbRejected, "SMB operations correctly rejected when WebDAV-only enabled")
+
+        var ftpRejected = false
+        do { _ = try await ftpClient.testConnection() } catch StorageError.notSupported { ftpRejected = true } catch {}
+        assert(ftpRejected, "FTP operations correctly rejected when WebDAV-only enabled")
         
-        // 8.5 SMB Protocol Unit Checks
-        if let smbInstance = smbClient as? SMBStorageClient {
-            assert(smbInstance.config.share == "Public", "SMBStorageClient config share matches")
-            assert(smbInstance.config.displayURL == "smb://admin@192.168.1.100:445/Public", "SMB displayURL format")
-            assert(smbInstance.config.fullSMBURL != nil, "SMB fullSMBURL parsed successfully")
-        }
-        
-        // 8.6 FTP Protocol Unit Checks
-        if let ftpInstance = ftpClient as? FTPStorageClient {
-            assert(ftpInstance.config.port == 21, "FTPStorageClient config port matches")
-            assert(ftpInstance.config.scheme == "ftps", "FTPStorageClient with TLS returns ftps scheme")
-            assert(ftpInstance.config.displayURL.contains("ftps://"), "FTP displayURL contains ftps")
-        }
-        
-        // 8.7 VFS configured with StorageConfiguration
+        // 8.5 VFS configured with StorageConfiguration
         let uniqueVaultId = "multi_proto_\(UUID().uuidString.prefix(8))"
         let multiVFS = VirtualFileSystem(vaultId: uniqueVaultId)
-        let tempVfsDir = FileManager.default.temporaryDirectory.appendingPathComponent("multi_vfs_\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tempVfsDir, withIntermediateDirectories: true)
-        
-        multiVFS.configureStorage(configuration: .local(LocalStorageConfig(path: tempVfsDir.path)))
-        assert(multiVFS.getStorageClient() != nil, "VFS configureStorage sets storageClient")
-        
-        try await multiVFS.initializeDirectMappingVault(vaultId: uniqueVaultId, storagePath: tempVfsDir.path)
-        
-        let testDirItem = try await multiVFS.createDirectory(name: "cloud_folder", parentId: "ROOT")
-        assert(testDirItem.name == "cloud_folder", "VFS creates folder using multi-protocol StorageConfiguration")
-        
-        try? FileManager.default.removeItem(at: tempVfsDir)
+        multiVFS.configureStorage(configuration: .webdav(webdavConfig))
+        assert(multiVFS.getStorageClient() is WebDAVStorageClient, "VFS configureStorage sets WebDAV storageClient")
     } catch {
         print("❌ Unexpected error in Multi-Protocol tests: \(error)")
         failed += 1
@@ -925,27 +908,90 @@ func runTests() async throws {
 
 Task {
     do {
-        if CommandLine.arguments.contains("--pan123-only") {
-            try await runPan123Regressions()
-            print("✅ All Pan123 regressions passed")
+        if CommandLine.arguments.contains("--copy-only") {
+            try await runVFSCopyMovePerformanceRegressionTests()
             exit(0)
         }
-        
-        if CommandLine.arguments.contains("--recycle-bin-only") {
-            try await runRecycleBinRegressions()
-            print("✅ All RecycleBin regressions passed")
+        if CommandLine.arguments.contains("--baidupan-only") {
+            try await runBaiduPanRegressions()
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--file-provider-state-only") {
+            try runContentRevisionRegressionTests()
+            try runFileProviderPresentationRegressionTests()
+            try runSyncStateLifecycleRegressionTests()
+            print("✅ All File Provider state regressions passed")
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--webdav-only") || CommandLine.arguments.contains("--regression-only") {
+            try await runStorageAvailabilityRegressionTests()
+            try runSQLiteTransactionRegressionTests()
+            try runContentRevisionRegressionTests()
+            try runFileProviderPresentationRegressionTests()
+            try await runDatabaseSecurityRegressionTests()
+            try await runWebDAVRegressionTests()
+            try await runWebDAVBoundaryRegressionTests()
+            try await runSyncRegressionTests()
+            try await runSyncSafetyRegressionTests()
+            try runSyncCommitJournalRegressionTests()
+            try runSyncSaveAcceptanceRegressionTests()
+            try runSyncStateLifecycleRegressionTests()
+            try await runUploadVerificationRegressionTests()
+            try await runWebDAVUploadProofRegressionTests()
+            try await runVFSMutationRevisionRegressionTests()
+            try await runDirectoryDeleteRegressionTests()
+            try await runVFSCopyMovePerformanceRegressionTests()
+            try runDeletedPayloadRecoveryRegressionTests()
+            try await runDirectoryReconciliationRegressionTests()
+            try runQueueSchedulingRegressionTests()
+            try await runQueueVersionPerformanceRegressionTests()
+            try await runCacheRegressionTests()
+            try runCacheIntegrityRegressionTests()
+            try await runDataSafetyRegressionTests()
+            try await runCryptomatorRandomAccessRegressionTests()
+            try await runItemAliasStoreRegressionTests()
+            try await runFileOpenSyncStatusRegressionTests()
+            try await runVaultLockUnlockRegressionTests()
+            try await runExcludeSyncRegressionTests()
+            try await runProgressPublisherRegressionTests()
+            try await runBaiduPanRegressions()
+            print("✅ All storage & reliability regressions passed")
             exit(0)
         }
         
         if !CommandLine.arguments.contains("--regression-only") { try await runTests() }
+        try await runStorageAvailabilityRegressionTests()
+        try runSQLiteTransactionRegressionTests()
+        try runContentRevisionRegressionTests()
+        try runFileProviderPresentationRegressionTests()
+        try await runBaiduPanRegressions()
         try await runDatabaseSecurityRegressionTests()
         try await runWebDAVRegressionTests()
+        try await runWebDAVBoundaryRegressionTests()
         try await runSyncRegressionTests()
+        try await runSyncSafetyRegressionTests()
+        try runSyncCommitJournalRegressionTests()
+        try runSyncSaveAcceptanceRegressionTests()
+        try runSyncStateLifecycleRegressionTests()
+        try await runUploadVerificationRegressionTests()
+        try await runWebDAVUploadProofRegressionTests()
+        try await runVFSMutationRevisionRegressionTests()
+        try await runDirectoryDeleteRegressionTests()
+        try await runVFSCopyMovePerformanceRegressionTests()
+        try runDeletedPayloadRecoveryRegressionTests()
+        try await runDirectoryReconciliationRegressionTests()
+        try runQueueSchedulingRegressionTests()
+        try await runQueueVersionPerformanceRegressionTests()
         try await runCacheRegressionTests()
+        try runCacheIntegrityRegressionTests()
         try await runDataSafetyRegressionTests()
-        try await runProtocolSecurityRegressionTests()
-        try await runPan123Regressions()
-        try await runRecycleBinRegressions()
+        try await runCryptomatorRandomAccessRegressionTests()
+        try await runItemAliasStoreRegressionTests()
+        try await runFileOpenSyncStatusRegressionTests()
+        try await runVaultLockUnlockRegressionTests()
+        try await runExcludeSyncRegressionTests()
+        try await runProgressPublisherRegressionTests()
+        try await runBaiduPanRegressions()
         print("✅ All reliability regressions passed")
         exit(0)
     } catch {

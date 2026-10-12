@@ -41,7 +41,7 @@ public class VirtualFileSystem: SyncVaultAccess {
     let operationManager = FileOperationManager.shared
     
     // 当前保险库 ID，用于密钥链访问
-    public internal(set) var currentVaultId: String? {
+    public var currentVaultId: String? {
         didSet {
             if oldValue != currentVaultId {
                 if let oldValue { SyncManager.forVault(oldValue).activeVFS = nil }
@@ -113,48 +113,3 @@ extension VirtualFileSystem: ThumbnailRemoteSyncDelegate {
 
 // MARK: - VaultIgnoreVFSDelegate Conformance
 extension VirtualFileSystem: VaultIgnoreVFSDelegate {}
-
-// MARK: - RecycleBinVFSDelegate Conformance
-extension VirtualFileSystem: RecycleBinVFSDelegate {
-    public func markPendingDelete(file: VirtualFileItem) {
-        var meta = syncManager.getMetadata(fileId: file.id) ?? FileMetadata(
-            fileId: file.id,
-            name: file.name,
-            parentId: file.parentId,
-            isDirectory: file.isDirectory,
-            syncStatus: .pendingDelete,
-            remotePath: file.remotePath ?? "",
-            size: file.size
-        )
-        meta.syncStatus = .pendingDelete
-        syncManager.updateMetadata(meta)
-    }
-
-    public func listLocalChildren(parentId: String) -> [VirtualFileItem]? {
-        return try? database.listChildren(parentId: parentId)
-    }
-    
-    public func resolveRestoredRemotePath(finalName: String, targetParentId: String, isDirectory: Bool) -> (remotePath: String, fileId: String) {
-        if isEncrypted, let format = cryptomatorFormat {
-            let parentDirId = format.dirIdData(from: targetParentId)
-            if isDirectory {
-                let (newDirRemotePath, _, _, _) = (try? format.getDirectoryRemotePath(name: finalName, parentDirId: parentDirId)) ?? ("", false, "", nil)
-                return (newDirRemotePath, UUID().uuidString)
-            } else {
-                let (newFileRemotePath, _, encName, _) = (try? format.getFileRemotePath(name: finalName, parentDirId: parentDirId)) ?? ("", false, "", nil)
-                return (newFileRemotePath, "file_\(encName)")
-            }
-        } else {
-            let remotePath = targetParentId == "ROOT" ? "/\(finalName)" : "\(targetParentId)/\(finalName)"
-            return (remotePath, remotePath)
-        }
-    }
-    
-    public func scheduleRestoredUpload(fileId: String, fileName: String, parentId: String, localPath: String, remotePath: String, vaultId: String) {
-        if isEncrypted {
-            try? syncManager.enqueuePersistent(.encryptedUpload(fileId: fileId, fileName: fileName, parentId: parentId, localPath: localPath, vaultId: vaultId))
-        } else {
-            try? syncManager.enqueuePersistent(.upload(fileId: fileId, localPath: localPath, remotePath: remotePath))
-        }
-    }
-}

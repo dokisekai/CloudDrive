@@ -57,31 +57,6 @@ extension FileProviderExtension {
                logInfo(.fileOps, "   Is root directory: \(actualParentId == "ROOT")")
                logInfo(.fileOps, "   Path format check: \(actualParentId.hasPrefix("/") || actualParentId == "ROOT" ? "✅" : "❌")")
                
-               // Ignore rule check: ignored files/dirs are not uploaded to remote to prevent sync loops with build artifacts
-               let vaultId = self.currentVaultIdentifier
-               let filename = itemTemplate.filename
-               let isDir = itemTemplate.contentType == .folder
-               let checkPath = actualParentId == "ROOT" ? filename : "\(actualParentId)/\(filename)"
-               
-               if IgnoreRuleEngine.shared.shouldIgnore(path: checkPath, name: filename, isDirectory: isDir, vaultId: vaultId) {
-                   logInfo(.sync, "🚫 createItem: Skipping remote upload for ignored item: \(checkPath)")
-                   let localVfsItem = VirtualFileItem(
-                       id: "ignored_\(UUID().uuidString)",
-                       name: filename,
-                       isDirectory: isDir,
-                       size: 0,
-                       modifiedAt: Date(),
-                       parentId: actualParentId,
-                       syncStatus: .localOnly,
-                       localPath: url?.path,
-                       remotePath: nil
-                   )
-                   let fpItem = self.makeItem(vfsItem: localVfsItem, isEncrypted: self.vfs.isEncrypted)
-                   progress.completedUnitCount = 100
-                   completionHandler(fpItem, [], false, nil)
-                   return
-               }
-               
                // Check for filename collision in target directory unless mayAlreadyExist option is set
                if !options.contains(.mayAlreadyExist) {
                    if let existingChildren = try? self.vfs.listDirectory(directoryId: actualParentId) {
@@ -115,7 +90,7 @@ extension FileProviderExtension {
                completionHandler(nil, [], false, error)
            } catch {
                logError(.fileOps, "❌ FileProvider: Unknown error in createItem: \(error)")
-               let fpError = NSFileProviderError(.cannotSynchronize)
+               let fpError = mapToFileProviderError(error)
                progress.completedUnitCount = 100
                completionHandler(nil, [], false, fpError)
            }

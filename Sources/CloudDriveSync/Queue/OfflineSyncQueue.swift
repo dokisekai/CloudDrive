@@ -13,8 +13,9 @@ public final class OfflineSyncQueue: @unchecked Sendable {
     let dbURL: URL
     let migrationLock = NSLock()
     var hasCheckedMigration = false
+    var schemaError: Error?
 
-    var persistenceURL: URL { dbURL }
+    public var persistenceURL: URL { dbURL }
 
     public init(queueURL: URL = CloudDrivePaths.sharedDirectory.appendingPathComponent("sync_queue.json")) {
         self.queueURL = queueURL

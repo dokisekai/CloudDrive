@@ -3,17 +3,30 @@ import CloudDriveContracts
 import CloudDriveSupport
 
 final class WebDAVXMLParser: NSObject, XMLParserDelegate {
+    private let isoDateFormatter = ISO8601DateFormatter()
+    private let rfcDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return formatter
+    }()
+    private var baseURL: URL?
     private var resources: [WebDAVResource] = []
     private var currentResource: [String: String] = [:]
     private var currentElement: String = ""
     private var currentValue: String = ""
     private var propstat: [String: String]?
     private var sawMultistatus = false
+    private var depth = 0
     private var responseFailure: Int?
     private var failure: Int?
     
-    func parse(data: Data, basePath: String, baseURL: URL? = nil) throws -> [WebDAVResource] {
+    func parse(data: Data, basePath: String, baseURL: URL? = nil, excludingSelf: Bool = true) throws -> [WebDAVResource] {
+        try WebDAVXMLSafety.validate(data)
+        self.baseURL = baseURL
         let parser = XMLParser(data: data)
+        parser.shouldResolveExternalEntities = false
+        parser.shouldProcessNamespaces = true
         parser.delegate = self
         
         guard parser.parse(), sawMultistatus else { throw WebDAVError.parseError }
@@ -32,26 +45,43 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
             let cleanPrefix = normalize(basePrefix)
             if normalizedBase == "/" {
                 normalizedBase = cleanPrefix
-            } else if !normalizedBase.hasPrefix(cleanPrefix) {
+            } else if normalizedBase != cleanPrefix && !normalizedBase.hasPrefix(cleanPrefix + "/") {
                 normalizedBase = normalize(cleanPrefix + normalizedBase)
             }
         }
         
-        // 过滤掉当前目录自身
-        return resources.filter { resource in
-            let normPath = normalize(resource.path)
-            return normPath != normalizedBase
+        // A Depth: 1 snapshot must never inject siblings, parents, or descendants.
+        var seen = Set<String>()
+        for resource in resources {
+            let candidate = normalize(resource.path)
+            let components = candidate.split(separator: "/")
+            guard !components.contains("."), !components.contains(".."),
+                  !candidate.contains("\\"), !candidate.unicodeScalars.contains(where: { $0.value < 32 }),
+                  seen.insert(candidate).inserted else { throw WebDAVError.parseError }
+            if candidate != normalizedBase {
+                let prefix = normalizedBase == "/" ? "/" : normalizedBase + "/"
+                guard candidate.hasPrefix(prefix), !candidate.dropFirst(prefix.count).contains("/") else { throw WebDAVError.parseError }
+            }
         }
+        return excludingSelf ? resources.filter { normalize($0.path) != normalizedBase } : resources
     }
-    
+
     func parser(_ parser: XMLParser, didStartElement elementName: String,
                 namespaceURI: String?, qualifiedName qName: String?,
                 attributes attributeDict: [String: String] = [:]) {
         let localName = elementName.components(separatedBy: ":").last?.lowercased() ?? elementName.lowercased()
+        depth += 1
+        guard depth <= 64 else { parser.abortParsing(); return }
+        if depth == 1 {
+            guard localName == "multistatus", namespaceURI == "DAV:" else { parser.abortParsing(); return }
+            sawMultistatus = true
+        }
+        let davNames: Set<String> = ["multistatus", "response", "propstat", "prop", "href", "status", "displayname", "getcontentlength", "getcontenttype", "creationdate", "getlastmodified", "getetag", "resourcetype", "collection"]
+        if davNames.contains(localName), namespaceURI != "DAV:" { parser.abortParsing(); return }
         currentElement = localName
         currentValue = ""
         
-        if localName == "multistatus" { sawMultistatus = true }
+
         if localName == "response" {
             currentResource = [:]
             responseFailure = nil
@@ -60,12 +90,14 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
     }
     
     func parser(_ parser: XMLParser, foundCharacters string: String) {
+        guard currentValue.utf8.count + string.utf8.count <= 1024 * 1024 else { parser.abortParsing(); return }
         currentValue += string
     }
     
     func parser(_ parser: XMLParser, didEndElement elementName: String,
                 namespaceURI: String?, qualifiedName qName: String?) {
         let localName = elementName.components(separatedBy: ":").last?.lowercased() ?? elementName.lowercased()
+        depth -= 1
         
         let value = currentValue.trimmingCharacters(in: .whitespacesAndNewlines)
         switch localName {
@@ -93,11 +125,19 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
                 // An all-failed resource makes the snapshot incomplete; do not prune caches.
                 failure = 502
             } else if let href = currentResource["href"] {
-                let encodedPath = URLComponents(string: href)?.percentEncodedPath ?? href
+                guard let components = URLComponents(string: href), components.query == nil, components.fragment == nil else { failure = 502; break }
+                if let host = components.host {
+                    guard let baseURL, host.lowercased() == baseURL.host?.lowercased(),
+                          components.scheme?.lowercased() == baseURL.scheme?.lowercased(),
+                          (components.port ?? (components.scheme == "https" ? 443 : 80)) == (baseURL.port ?? (baseURL.scheme == "https" ? 443 : 80)) else { failure = 502; break }
+                }
+                let encodedPath = components.percentEncodedPath
+                guard !encodedPath.lowercased().contains("%2f"), !encodedPath.lowercased().contains("%5c"),
+                      encodedPath.removingPercentEncoding != nil else { failure = 502; break }
                 let cleanHref = encodedPath.removingPercentEncoding ?? encodedPath
                 let resource = WebDAVResource(
                     path: cleanHref,
-                    displayName: currentResource["displayname"]?.isEmpty == false ? currentResource["displayname"]! : (cleanHref.split(separator: "/").last.map(String.init) ?? ""),
+                    displayName: cleanHref.split(separator: "/").last.map(String.init) ?? "",
                     isDirectory: currentResource["isdirectory"] == "true",
                     contentLength: Int64(currentResource["contentlength"] ?? "0") ?? 0,
                     contentType: currentResource["contenttype"],
@@ -117,14 +157,7 @@ final class WebDAVXMLParser: NSObject, XMLParserDelegate {
     private func parseDate(_ dateString: String?) -> Date? {
         guard let dateString = dateString else { return nil }
         
-        let formatter = ISO8601DateFormatter()
-        if let date = formatter.date(from: dateString) {
-            return date
-        }
-        
-        let rfc1123Formatter = DateFormatter()
-        rfc1123Formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
-        rfc1123Formatter.locale = Locale(identifier: "en_US_POSIX")
-        return rfc1123Formatter.date(from: dateString)
+        if let date = isoDateFormatter.date(from: dateString) { return date }
+        return rfcDateFormatter.date(from: dateString)
     }
 }

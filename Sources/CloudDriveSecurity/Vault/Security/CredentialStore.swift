@@ -9,6 +9,12 @@ public final class CredentialStore: @unchecked Sendable {
     public static let shared = CredentialStore()
     public static let sharedGroup = "group.net.aabg.CloudDrive"
     public static let serviceName = "net.aabg.CloudDrive"
+    
+    private struct VaultCredentialsRecord: Codable {
+        var storagePassword: String?
+        var vaultPassword: String?
+    }
+    
     private init() {}
 
     private func queries(account: String) -> [[String: Any]] {
@@ -39,16 +45,18 @@ public final class CredentialStore: @unchecked Sendable {
             let update = [kSecValueData as String: data]
             let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
             if status == errSecSuccess { return true }
-            if status == errSecItemNotFound {
-                var add = query
-                add[kSecValueData as String] = data
-                if query[kSecUseDataProtectionKeychain as String] != nil {
-                    add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-                }
-                if SecItemAdd(add as CFDictionary, nil) == errSecSuccess { return true }
+            
+            // If update was not successful, attempt clean replace
+            SecItemDelete(query as CFDictionary)
+            
+            var add = query
+            add[kSecValueData as String] = data
+            if query[kSecUseDataProtectionKeychain as String] != nil {
+                add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             }
+            if SecItemAdd(add as CFDictionary, nil) == errSecSuccess { return true }
         }
-        Logger.shared.error(.system, "CredentialStore: Could not persist credential in Keychain")
+        Logger.shared.error(.system, "CredentialStore: Could not persist credential in Keychain for account \(account)")
         return false
     }
 
@@ -59,17 +67,46 @@ public final class CredentialStore: @unchecked Sendable {
             activeKeys.forEach { defaults.removeObject(forKey: $0) }
         }
     }
+    
+    private func loadBundle(for vaultId: String) -> VaultCredentialsRecord {
+        var record = VaultCredentialsRecord()
+        if let jsonStr = read(account: "vault-credentials-\(vaultId)"),
+           let data = jsonStr.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(VaultCredentialsRecord.self, from: data) {
+            record = decoded
+        }
+        
+        // Backward compatibility fallback to individual legacy accounts
+        if record.storagePassword == nil {
+            record.storagePassword = read(account: "storage-password-\(vaultId)") ?? read(account: "webdav-password-\(vaultId)")
+        }
+        if record.vaultPassword == nil {
+            record.vaultPassword = read(account: "vault-password-\(vaultId)")
+        }
+        return record
+    }
+    
+    private func persistBundle(_ record: VaultCredentialsRecord, for vaultId: String) -> Bool {
+        guard let data = try? JSONEncoder().encode(record),
+              let jsonStr = String(data: data, encoding: .utf8) else {
+            return false
+        }
+        return write(jsonStr, account: "vault-credentials-\(vaultId)")
+    }
 
     @discardableResult
     public func saveStoragePassword(_ password: String, for vaultId: String) -> Bool {
-        guard write(password, account: "storage-password-\(vaultId)") else { return false }
+        var bundle = loadBundle(for: vaultId)
+        bundle.storagePassword = password
+        guard persistBundle(bundle, for: vaultId) else { return false }
         removeLegacy(vaultId: vaultId, keys: ["webdav_password", "storage_password"],
             activeKeys: ["active_webdav_password", "active_storage_password"])
         return true
     }
 
     public func getStoragePassword(for vaultId: String) -> String? {
-        if let value = read(account: "storage-password-\(vaultId)") ?? read(account: "webdav-password-\(vaultId)") {
+        let bundle = loadBundle(for: vaultId)
+        if let value = bundle.storagePassword, !value.isEmpty {
             removeLegacy(vaultId: vaultId, keys: ["webdav_password", "storage_password"],
                 activeKeys: ["active_webdav_password", "active_storage_password"])
             return value
@@ -83,6 +120,9 @@ public final class CredentialStore: @unchecked Sendable {
     }
 
     public func deleteStoragePassword(for vaultId: String) {
+        var bundle = loadBundle(for: vaultId)
+        bundle.storagePassword = nil
+        _ = persistBundle(bundle, for: vaultId)
         for account in ["storage-password-\(vaultId)", "webdav-password-\(vaultId)"] {
             queries(account: account).forEach { SecItemDelete($0 as CFDictionary) }
         }
@@ -92,13 +132,16 @@ public final class CredentialStore: @unchecked Sendable {
 
     @discardableResult
     public func saveVaultPassword(_ password: String, for vaultId: String) -> Bool {
-        guard write(password, account: "vault-password-\(vaultId)") else { return false }
+        var bundle = loadBundle(for: vaultId)
+        bundle.vaultPassword = password
+        guard persistBundle(bundle, for: vaultId) else { return false }
         removeLegacy(vaultId: vaultId, keys: ["vault_password"], activeKeys: ["active_vault_password"])
         return true
     }
 
     public func getVaultPassword(for vaultId: String) -> String? {
-        if let value = read(account: "vault-password-\(vaultId)") {
+        let bundle = loadBundle(for: vaultId)
+        if let value = bundle.vaultPassword, !value.isEmpty {
             removeLegacy(vaultId: vaultId, keys: ["vault_password"], activeKeys: ["active_vault_password"])
             return value
         }
@@ -110,6 +153,9 @@ public final class CredentialStore: @unchecked Sendable {
     }
 
     public func deleteVaultPassword(for vaultId: String) {
+        var bundle = loadBundle(for: vaultId)
+        bundle.vaultPassword = nil
+        _ = persistBundle(bundle, for: vaultId)
         queries(account: "vault-password-\(vaultId)").forEach { SecItemDelete($0 as CFDictionary) }
         removeLegacy(vaultId: vaultId, keys: ["vault_password"], activeKeys: ["active_vault_password"])
     }
@@ -120,7 +166,29 @@ public final class CredentialStore: @unchecked Sendable {
         if let value = vaultPassword { _ = saveVaultPassword(value, for: vaultId) }
     }
 
-    public func storeMasterKey(_ key: Masterkey, forVault vaultId: String) throws { try KeychainService.storeMasterKey(key, forVault: vaultId) }
-    public func getMasterKey(forVault vaultId: String) throws -> Masterkey? { try KeychainService.getMasterKey(forVault: vaultId) }
-    public func deleteMasterKey(forVault vaultId: String) throws { try KeychainService.deleteMasterKey(forVault: vaultId) }
+    public func storeMasterKey(_ key: Masterkey, forVault vaultId: String) throws {
+        // Master key is held securely in active memory session; skip redundant Keychain disk writes to avoid prompt fatigue
+    }
+    public func getMasterKey(forVault vaultId: String) throws -> Masterkey? {
+        return nil
+    }
+    public func deleteMasterKey(forVault vaultId: String) throws {
+        try? KeychainService.deleteMasterKey(forVault: vaultId)
+    }
+
+    @discardableResult
+    public func saveBaiduPanToken(data: Data, for vaultId: String) -> Bool {
+        return write(data.base64EncodedString(), account: "baidupan-token-\(vaultId)")
+    }
+
+    public func getBaiduPanToken(for vaultId: String) -> Data? {
+        if let b64 = read(account: "baidupan-token-\(vaultId)") {
+            return Data(base64Encoded: b64)
+        }
+        return nil
+    }
+
+    public func deleteBaiduPanToken(for vaultId: String) {
+        queries(account: "baidupan-token-\(vaultId)").forEach { SecItemDelete($0 as CFDictionary) }
+    }
 }

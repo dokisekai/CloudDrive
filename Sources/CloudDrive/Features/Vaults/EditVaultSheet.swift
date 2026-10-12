@@ -19,16 +19,12 @@ struct EditVaultSheet: View {
     
     @State private var vaultName: String
     @State private var isAutoMount: Bool
-    
-    // Local
-    @State private var localPath: String
-    @State private var localBookmarkData: Data?
-    
+
     // WebDAV
     @State private var webdavURL: String
     @State private var webdavUsername: String
     @State private var webdavPassword: String = ""
-    
+
     // S3
     @State private var s3Endpoint: String
     @State private var s3Region: String
@@ -36,36 +32,22 @@ struct EditVaultSheet: View {
     @State private var s3AccessKey: String
     @State private var s3SecretKey: String = ""
     @State private var s3Path: String
-    
-    // SMB
-    @State private var smbHost: String
-    @State private var smbShare: String
-    @State private var smbSubpath: String
-    @State private var smbUsername: String
-    @State private var smbPassword: String = ""
-    
-    // FTP
-    @State private var ftpHost: String
-    @State private var ftpPort: String
-    @State private var ftpUsername: String
-    @State private var ftpPassword: String = ""
-    
-    // Pan123
-    @State private var pan123ClientID: String
-    @State private var pan123ClientSecret: String = ""
-    @State private var pan123AccessToken: String
-    @State private var pan123RootFolderID: Int64
-    @State private var pan123RootPath: String
-    
+
+    // 百度网盘
+    @State private var baiduAppID: String = ""
+    @State private var baiduAppKey: String = ""
+    @State private var baiduClientSecret: String = ""
+    @State private var baiduRefreshToken: String = ""
+    @State private var baiduAppFolderName: String = "CloudDrive"
+    @State private var baiduRootPath: String = "/"
+
     // 加密主密码
     @State private var vaultPassword: String = ""
     @State private var showingChangePasswordSheet: Bool = false
     
-    // 回收站设置（针对此加密库，存入库内 vfs.db）
-    @State private var recycleBinEnabled: Bool
-    @State private var recycleBinItemCount: Int = 0
-    @State private var recycleBinTotalBytes: Int64 = 0
-    @State private var showingEmptyVaultTrashAlert: Bool = false
+
+    // 库专属忽略规则 (.clouddriveignore)
+    @State private var vaultIgnoreText: String
     
     @State private var showingSaveAlert = false
     @State private var saveErrorMessage: String?
@@ -75,12 +57,8 @@ struct EditVaultSheet: View {
         self.vault = vault
         _vaultName = State(initialValue: vault.name)
         _isAutoMount = State(initialValue: vault.isAutoMount)
-        _localPath = State(initialValue: vault.storagePath)
-        _localBookmarkData = State(initialValue: vault.bookmarkData)
-        
-        _recycleBinEnabled = State(initialValue: RecycleBinConfig.isEnabled(for: vault.id))
-        _recycleBinItemCount = State(initialValue: RecycleBinManager.shared.count(vaultId: vault.id))
-        _recycleBinTotalBytes = State(initialValue: RecycleBinManager.shared.totalSize(vaultId: vault.id))
+
+        _vaultIgnoreText = State(initialValue: VFSDatabase(vaultId: vault.id).getIgnoreRules() ?? VaultIgnoreManager.defaultContent)
         
         // 初始化 WebDAV
         _webdavURL = State(initialValue: vault.webdavURL ?? "")
@@ -101,41 +79,13 @@ struct EditVaultSheet: View {
             _s3Path = State(initialValue: "/")
         }
         
-        // 初始化 SMB
-        if let config = vault.storageConfig, case .smb(let smb) = config {
-            _smbHost = State(initialValue: smb.host)
-            _smbShare = State(initialValue: smb.share)
-            _smbSubpath = State(initialValue: smb.path)
-            _smbUsername = State(initialValue: smb.username)
-        } else {
-            _smbHost = State(initialValue: "")
-            _smbShare = State(initialValue: "")
-            _smbSubpath = State(initialValue: "")
-            _smbUsername = State(initialValue: "")
-        }
-        
-        // 初始化 FTP
-        if let config = vault.storageConfig, case .ftp(let ftp) = config {
-            _ftpHost = State(initialValue: ftp.host)
-            _ftpPort = State(initialValue: String(ftp.port))
-            _ftpUsername = State(initialValue: ftp.username)
-        } else {
-            _ftpHost = State(initialValue: "")
-            _ftpPort = State(initialValue: "21")
-            _ftpUsername = State(initialValue: "")
-        }
-        
-        // 初始化 Pan123
-        if let config = vault.storageConfig, case .pan123(let pan) = config {
-            _pan123ClientID = State(initialValue: pan.clientID)
-            _pan123AccessToken = State(initialValue: pan.accessToken ?? "")
-            _pan123RootFolderID = State(initialValue: pan.rootFolderID)
-            _pan123RootPath = State(initialValue: pan.rootPath)
-        } else {
-            _pan123ClientID = State(initialValue: "")
-            _pan123AccessToken = State(initialValue: "")
-            _pan123RootFolderID = State(initialValue: 0)
-            _pan123RootPath = State(initialValue: "/")
+        // 初始化百度网盘
+        if let config = vault.storageConfig, case .baidupan(let pan) = config {
+            _baiduAppID = State(initialValue: pan.appID)
+            _baiduAppKey = State(initialValue: pan.appKey)
+            _baiduRefreshToken = State(initialValue: pan.refreshToken)
+            _baiduAppFolderName = State(initialValue: pan.appFolderName)
+            _baiduRootPath = State(initialValue: pan.rootPath)
         }
     }
     
@@ -182,31 +132,6 @@ struct EditVaultSheet: View {
                                 .textFieldStyle(.roundedBorder)
                         }
                         
-                        if vault.isLocal {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(L("field_local_path"))
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                HStack(spacing: 8) {
-                                    Text(localPath)
-                                        .font(.system(size: 12, design: .monospaced))
-                                        .foregroundColor(.primary)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                        .padding(8)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .background(Color(NSColor.textBackgroundColor))
-                                        .cornerRadius(6)
-                                    
-                                    Button(L("field_local_reselect")) {
-                                        selectLocalFolder()
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
-                                }
-                            }
-                        }
-                        
                         Divider().padding(.vertical, 4)
                         
                         Toggle(isOn: $isAutoMount) {
@@ -225,7 +150,7 @@ struct EditVaultSheet: View {
                     .cornerRadius(10)
                     
                     // 存储连接配置
-                    if !vault.isLocal {
+                    if vault.isStorageEnabled {
                         VStack(alignment: .leading, spacing: 12) {
                             Text(L("section_storage_config"))
                                 .font(.headline)
@@ -299,116 +224,55 @@ struct EditVaultSheet: View {
                                         .textFieldStyle(.roundedBorder)
                                 }
                                 
-                            case .smb:
-                                HStack(spacing: 12) {
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        Text(L("field_smb_host"))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                        TextField("192.168.1.100", text: $smbHost)
-                                            .textFieldStyle(.roundedBorder)
-                                    }
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        Text(L("field_smb_share"))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                        TextField("ShareName", text: $smbShare)
-                                            .textFieldStyle(.roundedBorder)
-                                    }
-                                }
-                                
+                            case .baidupan:
                                 VStack(alignment: .leading, spacing: 6) {
-                                    Text(L("field_username"))
+                                    Text(L("field_baidupan_app_id"))
                                         .font(.caption)
                                         .foregroundColor(.secondary)
-                                    TextField("Username", text: $smbUsername)
+                                    TextField("App ID", text: $baiduAppID)
                                         .textFieldStyle(.roundedBorder)
                                 }
-                                
+
                                 VStack(alignment: .leading, spacing: 6) {
-                                    Text(L("field_password_new_hint"))
+                                    Text(L("field_baidupan_app_key"))
                                         .font(.caption)
                                         .foregroundColor(.secondary)
-                                    SecureField(L("field_password_keep_placeholder"), text: $smbPassword)
+                                    TextField("App Key", text: $baiduAppKey)
                                         .textFieldStyle(.roundedBorder)
                                 }
-                                
-                            case .ftp:
-                                HStack(spacing: 12) {
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        Text(L("field_ftp_host"))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                        TextField("ftp.example.com", text: $ftpHost)
-                                            .textFieldStyle(.roundedBorder)
-                                    }
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        Text("Port")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                        TextField("21", text: $ftpPort)
-                                            .textFieldStyle(.roundedBorder)
-                                    }
-                                }
-                                
+
                                 VStack(alignment: .leading, spacing: 6) {
-                                    Text(L("field_username"))
+                                    Text(L("field_baidupan_app_folder"))
                                         .font(.caption)
                                         .foregroundColor(.secondary)
-                                    TextField("anonymous", text: $ftpUsername)
+                                    TextField("CloudDrive", text: $baiduAppFolderName)
                                         .textFieldStyle(.roundedBorder)
                                 }
-                                
+
                                 VStack(alignment: .leading, spacing: 6) {
-                                    Text(L("field_password_new_hint"))
+                                    Text(L("field_baidupan_client_secret"))
                                         .font(.caption)
                                         .foregroundColor(.secondary)
-                                    SecureField(L("field_password_keep_placeholder"), text: $ftpPassword)
+                                    SecureField(L("field_password_keep_placeholder"), text: $baiduClientSecret)
                                         .textFieldStyle(.roundedBorder)
                                 }
-                                
-                            case .pan123:
+
                                 VStack(alignment: .leading, spacing: 6) {
-                                    Text(L("field_pan123_client_id"))
+                                    Text(L("field_baidupan_refresh_token"))
                                         .font(.caption)
                                         .foregroundColor(.secondary)
-                                    TextField("App Client ID", text: $pan123ClientID)
+                                    SecureField(L("field_password_keep_placeholder"), text: $baiduRefreshToken)
                                         .textFieldStyle(.roundedBorder)
                                 }
-                                
+
                                 VStack(alignment: .leading, spacing: 6) {
-                                    Text(L("field_pan123_client_secret"))
+                                    Text(L("field_baidupan_root_path"))
                                         .font(.caption)
                                         .foregroundColor(.secondary)
-                                    SecureField(L("field_password_keep_placeholder"), text: $pan123ClientSecret)
+                                    TextField("/", text: $baiduRootPath)
                                         .textFieldStyle(.roundedBorder)
                                 }
-                                
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text(L("field_pan123_token"))
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    TextField("Access Token", text: $pan123AccessToken)
-                                        .textFieldStyle(.roundedBorder)
-                                }
-                                
-                                HStack(spacing: 12) {
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        Text(L("field_pan123_root_id"))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                        TextField("0", value: $pan123RootFolderID, formatter: NumberFormatter())
-                                            .textFieldStyle(.roundedBorder)
-                                    }
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        Text(L("field_pan123_root_path"))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                        TextField("/", text: $pan123RootPath)
-                                            .textFieldStyle(.roundedBorder)
-                                    }
-                                }
-                                
+
                             default:
                                 EmptyView()
                             }
@@ -467,44 +331,44 @@ struct EditVaultSheet: View {
                         .cornerRadius(10)
                     }
                     
-                    // 回收站设置
+
+                    // 专属忽略规则 (.clouddriveignore)
                     VStack(alignment: .leading, spacing: 12) {
-                        Text(L("vault_recycle_bin_section"))
-                            .font(.headline)
-                        
-                        VStack(alignment: .leading, spacing: 8) {
-                            Toggle(isOn: $recycleBinEnabled) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(L("vault_recycle_bin_enable_toggle"))
-                                        .font(.subheadline)
-                                        .fontWeight(.medium)
-                                    Text(L("vault_recycle_bin_desc"))
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            .toggleStyle(.switch)
+                        HStack {
+                            Image(systemName: "line.3.crossed.swirl")
+                                .font(.headline)
+                                .foregroundColor(.accentColor)
+                            Text(L("ignore_tab_vault") + " (.clouddriveignore)")
+                                .font(.headline)
                         }
                         
-                        Divider()
+                        Text(L("ignore_vault_desc"))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        
+                        TextEditor(text: $vaultIgnoreText)
+                            .font(.system(.body, design: .monospaced))
+                            .frame(height: 120)
+                            .padding(4)
+                            .background(Color(NSColor.textBackgroundColor))
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                            )
                         
                         HStack {
-                            let sizeStr = ByteCountFormatter.string(fromByteCount: recycleBinTotalBytes, countStyle: .file)
-                            Text(L("vault_recycle_bin_current_usage", recycleBinItemCount, sizeStr))
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                            Button(L("ignore_preset_title")) {
+                                vaultIgnoreText = VaultIgnoreManager.defaultContent
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                             
                             Spacer()
                             
-                            if recycleBinItemCount > 0 {
-                                Button(role: .destructive) {
-                                    showingEmptyVaultTrashAlert = true
-                                } label: {
-                                    Label(L("vault_recycle_bin_empty_now"), systemImage: "trash")
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                            }
+                            Text(L("ignore_unified_tip"))
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
                         }
                     }
                     .padding(16)
@@ -561,20 +425,7 @@ struct EditVaultSheet: View {
             ChangeVaultPasswordSheet(vault: vault)
                 .environmentObject(appState)
         }
-        .alert(L("recycle_bin_empty_confirm_title"), isPresented: $showingEmptyVaultTrashAlert) {
-            Button(L("cancel"), role: .cancel) { }
-            Button(L("recycle_bin_confirm_empty"), role: .destructive) {
-                Task {
-                    _ = try? await RecycleBinManager.shared.emptyTrash(vaultId: vault.id)
-                    await MainActor.run {
-                        recycleBinItemCount = RecycleBinManager.shared.count(vaultId: vault.id)
-                        recycleBinTotalBytes = RecycleBinManager.shared.totalSize(vaultId: vault.id)
-                    }
-                }
-            }
-        } message: {
-            Text(L("recycle_bin_empty_confirm_msg"))
-        }
+
         .alert(L("vault_edit_remount_title"), isPresented: $showingRemountAlert) {
             Button(L("vault_edit_remount_now")) {
                 Task {
@@ -595,8 +446,11 @@ struct EditVaultSheet: View {
         let trimmedName = vaultName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return }
         
-        // 保存回收站策略（存入该加密库专属 vfs.db 数据库）
-        RecycleBinConfig.setEnabled(recycleBinEnabled, for: vault.id)
+
+        // 保存加密库专属忽略规则
+        let db = VFSDatabase(vaultId: vault.id)
+        try? db.setIgnoreRules(vaultIgnoreText)
+        IgnoreRuleEngine.shared.setVaultRules(vaultId: vault.id, content: vaultIgnoreText)
         
         var updated = vault
         // 更新名称与自动挂载
@@ -635,47 +489,39 @@ struct EditVaultSheet: View {
             if !s3SecretKey.isEmpty {
                 newStoragePassword = s3SecretKey
             }
-        case .smb:
-            let cleanHost = smbHost.trimmingCharacters(in: .whitespacesAndNewlines)
-            let cleanShare = smbShare.trimmingCharacters(in: .whitespacesAndNewlines)
-            let cleanSubpath = smbSubpath.trimmingCharacters(in: .whitespacesAndNewlines)
-            let cleanUser = smbUsername.trimmingCharacters(in: .whitespacesAndNewlines)
-            newStorageConfig = .smb(SMBStorageConfig(
-                host: cleanHost,
-                share: cleanShare,
-                path: cleanSubpath,
-                username: cleanUser,
-                password: smbPassword
-            ))
-            if !smbPassword.isEmpty {
-                newStoragePassword = smbPassword
+        case .baidupan:
+            // clientSecret / refreshToken 均为敏感值：留空表示沿用 Keychain 中的现值，
+            // 非空则作为新凭证覆盖。切勿把旧值回显到表单里。
+            let cleanAppID = baiduAppID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanAppKey = baiduAppKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanFolder = baiduAppFolderName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanRoot = baiduRootPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanSecret = baiduClientSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanRefresh = baiduRefreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            var merged = (vault.storageConfig.flatMap { cfg -> BaiduPanStorageConfig? in
+                if case .baidupan(let c) = cfg { return c }
+                return nil
+            }) ?? BaiduPanStorageConfig()
+
+            merged.appID = cleanAppID
+            merged.appKey = cleanAppKey
+            merged.appFolderName = cleanFolder
+            merged.rootPath = cleanRoot
+            if !cleanSecret.isEmpty { merged.clientSecret = cleanSecret }
+            merged.refreshToken = cleanRefresh.isEmpty ? merged.refreshToken : cleanRefresh
+            if merged.accessToken.isEmpty {
+                if let rec = (try? BaiduPanTokenStore().readRecordPublic(vault.id)) ?? (try? BaiduPanTokenStore().readRecordPublic("default")) {
+                    merged.accessToken = rec.accessToken
+                    merged.expiresAt = rec.expiresAt
+                }
             }
-        case .ftp:
-            let cleanHost = ftpHost.trimmingCharacters(in: .whitespacesAndNewlines)
-            let portInt = Int(ftpPort.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 21
-            let cleanUser = ftpUsername.trimmingCharacters(in: .whitespacesAndNewlines)
-            newStorageConfig = .ftp(FTPStorageConfig(
-                host: cleanHost,
-                port: portInt,
-                username: cleanUser,
-                password: ftpPassword
-            ))
-            if !ftpPassword.isEmpty {
-                newStoragePassword = ftpPassword
-            }
-        case .pan123:
-            let cleanID = pan123ClientID.trimmingCharacters(in: .whitespacesAndNewlines)
-            let cleanToken = pan123AccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
-            let cleanPath = pan123RootPath.trimmingCharacters(in: .whitespacesAndNewlines)
-            newStorageConfig = .pan123(Pan123StorageConfig(
-                clientID: cleanID,
-                clientSecret: pan123ClientSecret,
-                accessToken: cleanToken.isEmpty ? nil : cleanToken,
-                rootFolderID: pan123RootFolderID,
-                rootPath: cleanPath
-            ))
-            if !pan123ClientSecret.isEmpty {
-                newStoragePassword = pan123ClientSecret
+            newStorageConfig = .baidupan(merged)
+
+            if !cleanSecret.isEmpty {
+                newStoragePassword = cleanSecret
+            } else if !cleanRefresh.isEmpty {
+                newStoragePassword = cleanRefresh
             }
         default:
             break
@@ -686,7 +532,7 @@ struct EditVaultSheet: View {
         let newVault = VaultInfo(
             id: vault.id,
             name: trimmedName,
-            storagePath: vault.isLocal ? localPath : vault.storagePath,
+            storagePath: vault.storagePath,
             createdAt: vault.createdAt,
             storageType: vault.storageType,
             storageConfig: newStorageConfig,
@@ -694,7 +540,7 @@ struct EditVaultSheet: View {
             webdavUsername: updated.webdavUsername,
             isMounted: vault.isMounted,
             isEncrypted: vault.isEncrypted,
-            bookmarkData: vault.isLocal ? localBookmarkData : vault.bookmarkData,
+            bookmarkData: vault.bookmarkData,
             isAutoMount: isAutoMount
         )
         
@@ -703,29 +549,6 @@ struct EditVaultSheet: View {
             showingRemountAlert = true
         } else {
             dismiss()
-        }
-    }
-    
-    private func selectLocalFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = true
-        panel.prompt = L("open")
-        panel.message = L("local_folder_picker_prompt")
-        
-        if panel.runModal() == .OK, let selectedURL = panel.url {
-            self.localPath = selectedURL.path
-            do {
-                self.localBookmarkData = try selectedURL.bookmarkData(
-                    options: .withSecurityScope,
-                    includingResourceValuesForKeys: nil,
-                    relativeTo: nil
-                )
-            } catch {
-                logError(.system, "Failed to create security bookmark for reselected local URL: \(error)")
-            }
         }
     }
 }

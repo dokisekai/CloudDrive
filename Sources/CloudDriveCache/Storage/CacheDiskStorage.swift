@@ -24,8 +24,8 @@ public final class CacheDiskStorage: CacheDiskStorageProtocol, @unchecked Sendab
     
     public init(cacheDirectory: URL = CloudDrivePaths.sharedDirectory.appendingPathComponent("Cache", isDirectory: true)) {
         self.cacheDirectory = cacheDirectory.resolvingSymlinksInPath().standardized
-        try? fileManager.createDirectory(at: self.cacheDirectory, withIntermediateDirectories: true, attributes: nil)
-        try? fileManager.createDirectory(at: self.blobsDirectory, withIntermediateDirectories: true, attributes: nil)
+        CloudDrivePaths.secureDirectory(at: self.cacheDirectory)
+        CloudDrivePaths.secureDirectory(at: self.blobsDirectory)
     }
     
     // MARK: - SHA-256 CAS Helpers
@@ -35,8 +35,8 @@ public final class CacheDiskStorage: CacheDiskStorageProtocol, @unchecked Sendab
         defer { try? handle.close() }
         var hasher = SHA256()
         let bufferSize = 1024 * 1024 // 1MB streaming buffer to prevent memory spikes
-        while autoreleasepool(invoking: {
-            let data = handle.readData(ofLength: bufferSize)
+        while try autoreleasepool(invoking: {
+            let data = try handle.read(upToCount: bufferSize) ?? Data()
             if data.isEmpty { return false }
             hasher.update(data: data)
             return true
@@ -78,8 +78,8 @@ public final class CacheDiskStorage: CacheDiskStorageProtocol, @unchecked Sendab
         let blobDir = blobsDirectory.appendingPathComponent(prefix, isDirectory: true)
         let blobURL = blobDir.appendingPathComponent(hash)
         
-        if !fileManager.fileExists(atPath: blobURL.path) {
-            try? fileManager.createDirectory(at: blobDir, withIntermediateDirectories: true)
+        if !fileManager.fileExists(atPath: blobURL.path) || (try? Self.computeSHA256(of: blobURL)) != hash {
+            try fileManager.createDirectory(at: blobDir, withIntermediateDirectories: true)
             try data.write(to: blobURL, options: .atomic)
         }
         
@@ -97,6 +97,10 @@ public final class CacheDiskStorage: CacheDiskStorageProtocol, @unchecked Sendab
     }
     
     public func cache(from sourceURL: URL, for fileId: String) throws -> Int64 {
+        try cache(from: sourceURL, for: fileId, onHashedContent: nil)
+    }
+
+    public func cache(from sourceURL: URL, for fileId: String, onHashedContent: ((String) -> Void)?) throws -> Int64 {
         let destinationURL = localPath(for: fileId)
         let destDir = destinationURL.deletingLastPathComponent()
         if !fileManager.fileExists(atPath: destDir.path) {
@@ -107,34 +111,46 @@ public final class CacheDiskStorage: CacheDiskStorageProtocol, @unchecked Sendab
             return try fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? Int64 ?? 0
         }
         
-        // 1. Content-Addressable Storage (CAS) Deduplication
-        let hash = (try? Self.computeSHA256(of: sourceURL)) ?? UUID().uuidString
-        let prefix = String(hash.prefix(2))
-        let blobDir = blobsDirectory.appendingPathComponent(prefix, isDirectory: true)
+        // Snapshot first. Hashing a live source and cloning it afterwards could
+        // publish changed bytes under the previous content's hash.
+        let snapshot = destDir.appendingPathComponent(".snapshot_\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: snapshot) }
+        let before = try sourceURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        if copyfile(sourceURL.path, snapshot.path, nil, copyfile_flags_t(COPYFILE_CLONE)) != 0 {
+            try fileManager.copyItem(at: sourceURL, to: snapshot)
+        }
+        let after = try sourceURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        guard before.fileSize == after.fileSize, before.contentModificationDate == after.contentModificationDate else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        let hash = try Self.computeSHA256(of: snapshot)
+        let blobDir = blobsDirectory.appendingPathComponent(String(hash.prefix(2)), isDirectory: true)
         let blobURL = blobDir.appendingPathComponent(hash)
-        
-        if !fileManager.fileExists(atPath: blobURL.path) {
-            try? fileManager.createDirectory(at: blobDir, withIntermediateDirectories: true)
+        // The new snapshot is already verified. Replacing the pool entry with
+        // its cheap clone repairs corruption without hashing another full file.
+        do {
+            try fileManager.createDirectory(at: blobDir, withIntermediateDirectories: true)
             let blobStaging = blobDir.appendingPathComponent(".staging_\(UUID().uuidString)")
             defer { try? fileManager.removeItem(at: blobStaging) }
-            if copyfile(sourceURL.path, blobStaging.path, nil, copyfile_flags_t(COPYFILE_CLONE)) != 0 {
-                try fileManager.copyItem(at: sourceURL, to: blobStaging)
+            if copyfile(snapshot.path, blobStaging.path, nil, copyfile_flags_t(COPYFILE_CLONE)) != 0 {
+                try fileManager.copyItem(at: snapshot, to: blobStaging)
             }
-            _ = rename(blobStaging.path, blobURL.path)
+            guard rename(blobStaging.path, blobURL.path) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
         }
-        
-        // 2. Clone from deduplicated blob to local cache destination (APFS CoW zero-block clone)
         let stagingURL = destDir.appendingPathComponent(".cache_\(UUID().uuidString)")
         defer { try? fileManager.removeItem(at: stagingURL) }
-        
-        let cloneSource = fileManager.fileExists(atPath: blobURL.path) ? blobURL : sourceURL
-        if copyfile(cloneSource.path, stagingURL.path, nil, copyfile_flags_t(COPYFILE_CLONE)) != 0 {
-            try fileManager.copyItem(at: cloneSource, to: stagingURL)
+        // A pruning process may unlink the pool entry; the immutable snapshot
+        // always remains available for fallback without reading the live source.
+        if copyfile(blobURL.path, stagingURL.path, nil, copyfile_flags_t(COPYFILE_CLONE)) != 0 {
+            try fileManager.copyItem(at: snapshot, to: stagingURL)
         }
-        
+
         // rename replaces atomically without destroying the previous cache on copy failure.
         guard rename(stagingURL.path, destinationURL.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         let size = try fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? Int64 ?? 0
+        onHashedContent?(hash)
         return size
     }
     
@@ -159,9 +175,7 @@ public final class CacheDiskStorage: CacheDiskStorageProtocol, @unchecked Sendab
             if !fileManager.fileExists(atPath: newParentDir.path) {
                 try fileManager.createDirectory(at: newParentDir, withIntermediateDirectories: true)
             }
-            if fileManager.fileExists(atPath: newURL.path) {
-                try? fileManager.removeItem(at: newURL)
-            }
+            guard !fileManager.fileExists(atPath: newURL.path) else { throw CocoaError(.fileWriteFileExists) }
             try fileManager.moveItem(at: oldURL, to: newURL)
         }
     }
@@ -175,9 +189,7 @@ public final class CacheDiskStorage: CacheDiskStorageProtocol, @unchecked Sendab
             if !fileManager.fileExists(atPath: newParentDir.path) {
                 try fileManager.createDirectory(at: newParentDir, withIntermediateDirectories: true)
             }
-            if fileManager.fileExists(atPath: newURL.path) {
-                try? fileManager.removeItem(at: newURL)
-            }
+            guard !fileManager.fileExists(atPath: newURL.path) else { throw CocoaError(.fileWriteFileExists) }
             try fileManager.moveItem(at: oldURL, to: newURL)
         }
     }
@@ -192,21 +204,17 @@ public final class CacheDiskStorage: CacheDiskStorageProtocol, @unchecked Sendab
     public func clone(from sourceFileId: String, to destinationFileId: String) throws {
         let sourceURL = localPath(for: sourceFileId)
         let destURL = localPath(for: destinationFileId)
-        guard fileManager.fileExists(atPath: sourceURL.path) else { return }
-        
-        let parentDir = destURL.deletingLastPathComponent()
-        if !fileManager.fileExists(atPath: parentDir.path) {
-            try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
+        guard fileManager.fileExists(atPath: sourceURL.path) else { throw CocoaError(.fileReadNoSuchFile) }
+        if sourceURL.standardizedFileURL == destURL.standardizedFileURL { return }
+        try fileManager.createDirectory(at: destURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let staged = destURL.deletingLastPathComponent().appendingPathComponent(".clone_\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: staged) }
+        if copyfile(sourceURL.path, staged.path, nil, copyfile_flags_t(COPYFILE_CLONE)) != 0 {
+            try fileManager.copyItem(at: sourceURL, to: staged)
         }
-        if fileManager.fileExists(atPath: destURL.path) {
-            try? fileManager.removeItem(at: destURL)
-        }
-        
-        if copyfile(sourceURL.path, destURL.path, nil, copyfile_flags_t(COPYFILE_CLONE)) != 0 {
-            try fileManager.copyItem(at: sourceURL, to: destURL)
-        }
+        guard rename(staged.path, destURL.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
-    
+
     public func clearAll() throws {
         let contents = try fileManager.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil)
         for url in contents {
@@ -262,7 +270,7 @@ public final class CacheDiskStorage: CacheDiskStorageProtocol, @unchecked Sendab
                 continue
             }
             
-            guard resolvedURL.path.hasPrefix(cacheDirPath) else { continue }
+            guard resolvedURL.path.hasPrefix(cacheDirPath + "/") else { continue }
             let relativePath = String(resolvedURL.path.dropFirst(cacheDirPath.count))
             let fileId = relativePath.hasPrefix("/") ? relativePath : "/" + relativePath
             diskFiles.insert(fileId)

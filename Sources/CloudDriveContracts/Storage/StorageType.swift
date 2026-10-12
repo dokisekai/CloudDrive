@@ -7,8 +7,16 @@ public enum StorageType: String, Codable, CaseIterable, Identifiable, Sendable {
     case ftp = "ftp"
     case pan123 = "pan123"
     case local = "local"
+    case baidupan = "baidupan"
     
     public var id: String { rawValue }
+    
+    public var isAvailable: Bool {
+        switch self {
+        case .webdav, .baidupan: return true
+        default: return false
+        }
+    }
     
     public var displayName: String {
         switch self {
@@ -18,6 +26,7 @@ public enum StorageType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .ftp: return "FTP / FTPS"
         case .pan123: return "123云盘"
         case .local: return "本地文件夹"
+        case .baidupan: return "百度网盘"
         }
     }
     
@@ -29,6 +38,7 @@ public enum StorageType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .ftp: return "arrow.up.arrow.down.square"
         case .pan123: return "cloud.fill"
         case .local: return "folder.fill"
+        case .baidupan: return "icloud.fill"
         }
     }
     
@@ -40,6 +50,7 @@ public enum StorageType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .ftp: return 21
         case .pan123: return 443
         case .local: return 0
+        case .baidupan: return 443
         }
     }
 }

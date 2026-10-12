@@ -3,6 +3,7 @@ import FileProvider
 import UniformTypeIdentifiers
 import CloudDriveCore
 import CloudDriveRecovery
+import CloudDriveSupport
 
 extension FileProviderExtension {
     func deleteItem(identifier: NSFileProviderItemIdentifier,
@@ -22,83 +23,64 @@ extension FileProviderExtension {
                 }
                 try await ensureVaultUnlocked()
                 let id = identifier.rawValue
-                guard let item = try? findItem(identifier: id) else { completionHandler(nil); return }
+                let item = try findItem(identifier: id)
                 if !item.isDirectory {
-                    try? validateBaseVersion(version, item: item)
+                    try validateBaseVersion(version, item: item)
                 }
                 
-                // Recycle Bin (Soft Delete) Check
-                let isRecycleBinFolder = self.vfs.isRecycleBinDirectory(id: item.id)
-                let isAlreadyInBin = self.vfs.isItemInRecycleBin(item: item)
-                let isBinEnabled = RecycleBinConfig.isEnabled(for: self.currentVaultIdentifier)
-                
-                if isRecycleBinFolder {
-                    logInfo(.fileOps, "🧹 deleteItem: Trashing the Recycle Bin folder itself -> emptying trash")
-                    try await self.vfs.emptyTrash()
-                    self.signalEnumeratorDebounced(for: .rootContainer)
-                    if let bin = self.vfs.getRecycleBinDirectory() {
-                        self.signalEnumeratorDebounced(for: NSFileProviderItemIdentifier(bin.id))
-                    }
-                    self.signalEnumeratorDebounced(for: .workingSet)
-                    progress.completedUnitCount = 1
-                    completionHandler(nil)
-                    return
+                // Guard against accidental destruction of Cryptomator vault critical files
+                let protectedNames: Set<String> = ["masterkey.cryptomator", "masterkey.bkup", "vault.cryptomator", "dirid.c9r"]
+                if protectedNames.contains(item.name.lowercased()) {
+                    logError(.system, "🛡️ Blocked deletion of protected Cryptomator vault file: \(item.name)")
+                    throw NSFileProviderError(.deletionRejected)
                 }
                 
-                if isBinEnabled && !isAlreadyInBin {
-                    logInfo(.fileOps, "🗑️ deleteItem: Soft-deleting item to RecycleBin folder: \(item.name) (\(id))")
-                    _ = try await self.vfs.moveToRecycleBin(item: item)
-                    
-                    let oldParentIdentifier: NSFileProviderItemIdentifier = (item.parentId == "ROOT" || item.parentId == "/") ? .rootContainer : NSFileProviderItemIdentifier(item.parentId)
-                    self.signalEnumeratorDebounced(for: oldParentIdentifier)
-                    if let bin = self.vfs.getRecycleBinDirectory() {
-                        self.signalEnumeratorDebounced(for: NSFileProviderItemIdentifier(bin.id))
-                    }
-                    self.signalEnumeratorDebounced(for: .workingSet)
-                    progress.completedUnitCount = 1
-                    completionHandler(nil)
-                    return
-                }
+                logInfo(.fileOps, "🔥 deleteItem: Deleting item: \(item.name) (\(id))")
                 
-                logInfo(.fileOps, "🔥 deleteItem: Permanently deleting item: \(item.name) (\(id)) (isInRecycleBin=\(isAlreadyInBin), isBinEnabled=\(isBinEnabled))")
-                
-                let baseline = syncManager.getMetadata(fileId: id)
+                if item.isDirectory { try preserveLocalEditBeforeDeletion(item, fileId: id) }
+                let baseline = try syncManager.getMetadataPersistent(fileId: id)
                 let remotePath = item.remotePath ?? baseline?.remotePath ?? ""
 
-                // 2.3.2 Non-destructive safety snapshot for dirty / unuploaded files before deletion
-                let isDirty = baseline?.syncStatus == .pendingUpload || baseline?.syncStatus == .uploading || syncManager.hasPendingUpload(fileId: id)
+                let originalUploads = try syncManager.queue.itemsForFilePersistent(fileId: id).filter {
+                    guard $0.operation.fileId == id else { return false }
+                    switch $0.operation { case .upload, .encryptedUpload: return true; default: return false }
+                }
+                let isDirty = baseline?.syncStatus == .pendingUpload || baseline?.syncStatus == .uploading || !originalUploads.isEmpty
+                var retainedPayload: URL?
                 if isDirty && !item.isDirectory {
-                    let backupDir = CloudDrivePaths.vaultDirectory(for: self.currentVaultIdentifier).appendingPathComponent("DeletedPayloads")
-                    try? FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
-                    let tombstoneURL = backupDir.appendingPathComponent("\(UUID().uuidString)_\(item.name)")
-                    let cachedURL = cacheManager.localPath(for: id)
-                    if FileManager.default.fileExists(atPath: cachedURL.path) {
-                        if copyfile(cachedURL.path, tombstoneURL.path, nil, copyfile_flags_t(COPYFILE_CLONE)) != 0 {
-                            try? FileManager.default.copyItem(at: cachedURL, to: tombstoneURL)
-                        }
+                    let source = baseline?.localPath.map { URL(fileURLWithPath: $0) } ?? cacheManager.localPath(for: id)
+                    guard FileManager.default.fileExists(atPath: source.path) else {
+                        throw SyncError.operationFailed("Cannot preserve the pending edit before deleting")
                     }
-                    // Cancel redundant pending uploads from queue to save bandwidth
-                    syncManager.removePendingUploads(for: id)
+                    // Preserve cleartext edits for both encrypted and ordinary vaults.
+                    // This independent durable copy is retained after the delete completes.
+                    let backups = DeletedPayloadBackupStore(vaultId: self.currentVaultIdentifier)
+                    let backup = try backups.preserve(source: source, fileId: id, name: item.name, parentId: item.parentId, remotePath: remotePath, expectedETag: baseline?.etag)
+                    retainedPayload = try backups.payload(for: backup.id, verifyIntegrity: false)
                 }
 
-                if !remotePath.isEmpty {
+                if !remotePath.isEmpty && baseline?.syncStatus != .localOnly {
                     // Keep the path, encrypted directory UUID and tombstone before removing the DB row.
                     var tombstone = baseline ?? FileMetadata(fileId: id, name: item.name, parentId: item.parentId, isDirectory: item.isDirectory, syncStatus: .pendingDelete, remotePath: remotePath, size: item.size)
                     tombstone.syncStatus = .pendingDelete
-                    syncManager.updateMetadata(tombstone)
-                    try? syncManager.enqueuePersistent(.deleteItem(fileId: id, remotePath: remotePath, isDirectory: item.isDirectory, directoryId: item.isDirectory && vfs.isEncrypted ? id : nil, vaultId: self.currentVaultIdentifier))
+                    if let retainedPayload { tombstone.localPath = retainedPayload.path }
+                    try syncManager.updateMetadataPersistent(tombstone)
+                    try syncManager.enqueuePersistent(.deleteItem(fileId: id, remotePath: remotePath, isDirectory: item.isDirectory, directoryId: item.isDirectory && vfs.isEncrypted ? id : nil, vaultId: self.currentVaultIdentifier))
+                    // Active transfers retain their original payload until completion.
+                    try syncManager.queue.removeUnstartedItemsPersistent(ids: originalUploads.map(\.id))
                 }
                 vfs.deleteFromLocalDatabaseOnly(itemId: id)
+                ItemAliasStore.shared.removeAlias(for: id)
+                if item.id != id { ItemAliasStore.shared.removeAlias(for: item.id) }
                 if item.isDirectory { cacheManager.removeDirectoryCache(forDirectoryPrefix: id) }
                 else { try? cacheManager.removeCachedFile(fileId: id) }
                 ThumbnailManager.shared.invalidate(fileId: thumbnailIdentifier(id))
-                try? RecycleBinStore.shared.deleteByFileId(fileId: id)
                 signalEnumeratorDebounced(for: item.parentId == "ROOT" ? .rootContainer : NSFileProviderItemIdentifier(item.parentId))
                 signalEnumeratorDebounced(for: .workingSet)
                 progress.completedUnitCount = 1
                 completionHandler(nil)
             } catch {
-                completionHandler(error is CancellationError ? CocoaError(.userCancelled) : (error as? NSFileProviderError ?? NSFileProviderError(.cannotSynchronize)))
+                completionHandler(error is CancellationError ? CocoaError(.userCancelled) : (error as? NSFileProviderError ?? mapToFileProviderError(error)))
             }
         }
         progress.cancellationHandler = { task.cancel() }

@@ -8,8 +8,10 @@
 import FileProvider
 import UniformTypeIdentifiers
 import CloudDriveCore
+import CloudDriveSupport
 import AppKit
 import os.log
+import CryptoKit
 
 class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDecorating {
     
@@ -29,168 +31,23 @@ class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDecorati
     private let syncManager: SyncManager
     private let remoteETag: String?
     
-    // File ID (used for cache queries)
-    private var fileId: String {
-        return itemIdentifier.rawValue
-    }
-    
-    // MARK: - Upload Status (based on SyncManager)
-    
-    var isUploaded: Bool {
-        // Directories are always considered uploaded
-        if contentType == .folder {
-            os_log("DEBUG: FileProviderItem isUploaded - Directory, returning true", log: .default, type: .debug)
-            return true
-        }
-        
-        // Check sync status
-        if let metadata = syncManager.getMetadata(fileId: fileId) {
-            os_log("DEBUG: FileProviderItem isUploaded - Metadata found, syncStatus: %@", log: .default, type: .debug, metadata.syncStatus.rawValue)
-            switch metadata.syncStatus {
-            case .synced, .cloudOnly, .downloading, .partialDownload:
-                return true
-            case .uploading, .pendingUpload, .localOnly, .partialUpload, .pendingMove, .error, .conflict, .pendingDelete, .temporary, .locked, .verifying:
-                return false
-            @unknown default:
-                return true
-            }
-        }
-        
-        os_log("DEBUG: FileProviderItem isUploaded - No metadata, returning true", log: .default, type: .debug)
-        return true
-    }
-    
-    var isUploading: Bool {
-        // Directories do not require upload
-        if contentType == .folder {
-            return false
-        }
-        
-        // Check sync status
-        if let metadata = syncManager.getMetadata(fileId: fileId) {
-            return metadata.syncStatus == .uploading
-                || metadata.syncStatus == .pendingUpload
-                || metadata.syncStatus == .partialUpload
-        }
-        
-        return false
-    }
-    
-    var uploadingError: Error? {
-        if let metadata = syncManager.getMetadata(fileId: fileId),
-           metadata.syncStatus == .error {
-            return NSError(domain: "CloudDrive", code: -1, userInfo: [NSLocalizedDescriptionKey: "Upload failed"])
-        }
-        return nil
-    }
-    
-    // MARK: - Download Status (iCloud Style, based on SyncManager)
-    
-    private var isCacheStaleComparedToRemote: Bool {
-        guard let cacheMeta = cacheManager.getCacheMetadata(fileId: fileId),
-              let remoteDate = contentModificationDate else {
-            return false
-        }
-        if let remoteETag, let baseline = syncManager.getMetadata(fileId: fileId)?.etag { return remoteETag != baseline }
-        return remoteDate > cacheMeta.downloadedAt.addingTimeInterval(1.0)
-    }
-    
-    /// Whether file is downloaded locally
-    var isDownloaded: Bool {
-        // Directories are always considered downloaded
-        if contentType == .folder {
-            os_log("DEBUG: FileProviderItem isDownloaded - Directory, returning true", log: .default, type: .debug)
-            return true
-        }
-        
-        let physicallyCached = cacheManager.isCached(fileId: fileId)
-        guard physicallyCached else { return false }
-        
-        // If remote modification date is significantly newer than local cache download time, it is dirty and not treated as valid downloaded cache.
-        if isCacheStaleComparedToRemote {
-            return false
-        }
-        
-        // Check sync status
-        if let metadata = syncManager.getMetadata(fileId: fileId) {
-            os_log("DEBUG: FileProviderItem isDownloaded - Metadata found, syncStatus: %@, physicallyCached: %@", log: .default, type: .debug, metadata.syncStatus.rawValue, physicallyCached ? "true" : "false")
-            switch metadata.syncStatus {
-            case .cloudOnly, .downloading, .partialDownload, .pendingDelete, .temporary:
-                return false
-            case .synced, .localOnly:
-                return true
-            case .uploading, .pendingUpload, .partialUpload:
-                return true
-            case .pendingMove, .error, .conflict, .locked, .verifying:
-                return true
-            @unknown default:
-                return true
-            }
-        }
-        
-        // Fallback to physical cache check
-        os_log("DEBUG: FileProviderItem isDownloaded - No metadata, checking cache: %@", log: .default, type: .debug, physicallyCached ? "true" : "false")
-        return true
-    }
-    
-    /// Whether file is currently downloading
-    var isDownloading: Bool {
-        // Directories do not require download
-        if contentType == .folder {
-            os_log("DEBUG: FileProviderItem isDownloading - Directory, returning false", log: .default, type: .debug)
-            return false
-        }
-        
-        // Check sync status
-        if let metadata = syncManager.getMetadata(fileId: fileId) {
-            let isDownloading = metadata.syncStatus == .downloading || metadata.syncStatus == .partialDownload
-            os_log("DEBUG: FileProviderItem isDownloading - Metadata found, isDownloading: %@, syncStatus: %@", log: .default, type: .debug, isDownloading ? "true" : "false", metadata.syncStatus.rawValue)
-            return isDownloading
-        }
-        
-        os_log("DEBUG: FileProviderItem isDownloading - No metadata, returning false", log: .default, type: .debug)
-        return false
-    }
-    
-    /// Download progress (0.0 to 1.0)
-    var downloadProgress: Double {
-        // Directories do not require download progress
-        if contentType == .folder {
-            return 1.0
-        }
-        
-        // Check progress info in SyncManager
-        if let metadata = syncManager.getMetadata(fileId: fileId) {
-            if metadata.syncStatus == .downloading || metadata.syncStatus == .partialDownload {
-                // Use concrete download progress stored in metadata
-                return metadata.downloadProgress
-            } else if metadata.syncStatus == .synced || metadata.syncStatus == .localOnly {
-                return isDownloaded ? 1.0 : 0.0
-            } else if metadata.syncStatus == .cloudOnly {
-                return 0.0
-            }
-        }
-        
-        // By default, return 1.0 if downloaded, else 0.0
-        return isDownloaded ? 1.0 : 0.0
-    }
-    
-    /// Download error
-    var downloadingError: Error? {
-        if let metadata = syncManager.getMetadata(fileId: fileId),
-           metadata.syncStatus == .error {
-            return NSError(domain: "CloudDrive", code: -1, userInfo: [NSLocalizedDescriptionKey: "Download failed"])
-        }
-        return nil
-    }
-    
-    /// Whether the most recent version is downloaded
-    var isMostRecentVersionDownloaded: Bool {
-        let downloaded = isDownloaded && !isCacheStaleComparedToRemote
-        os_log("DEBUG: FileProviderItem isMostRecentVersionDownloaded - Filename: %@, isDownloaded: %@", log: .default, type: .debug, filename, downloaded ? "true" : "false")
-        return downloaded
-    }
-    
+    private let fileId: String
+    private let syncMetadata: FileMetadata?
+    private let cloudState: FileCloudState
+    private let excludedFromSync: Bool
+    private let cachePolicy: CachePolicy
+    private let snapshotLastUsedDate: Date?
+
+    var isExcludedFromSync: Bool { excludedFromSync }
+    var isUploaded: Bool { cloudState.isUploaded }
+    var isUploading: Bool { cloudState.isUploading }
+    var uploadingError: Error? { cloudState.hasUploadError ? NSFileProviderError(.serverUnreachable) : nil }
+    var isDownloaded: Bool { cloudState.isDownloaded }
+    var isDownloading: Bool { cloudState.isDownloading }
+    var downloadProgress: Double { cloudState.downloadProgress }
+    var downloadingError: Error? { cloudState.hasDownloadError ? NSFileProviderError(.serverUnreachable) : nil }
+    var isMostRecentVersionDownloaded: Bool { cloudState.isMostRecentVersionDownloaded }
+
     // Required properties: File capabilities
     var mostRecentEditorNameComponents: PersonNameComponents? {
         return nil
@@ -209,18 +66,8 @@ class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDecorati
         return false
     }
     
-    var isDeleted: Bool {
-        return false
-    }
-    
-    var lastUsedDate: Date? {
-        // If cached, return last accessed time
-        if let metadata = cacheManager.getCacheMetadata(fileId: fileId) {
-            return metadata.lastAccessedAt
-        }
-        return contentModificationDate
-    }
-    
+    var lastUsedDate: Date? { snapshotLastUsedDate ?? contentModificationDate }
+
     var thumbnailURL: URL? {
         let size = CGSize(width: 256, height: 256)
         let vault = cacheManager.vaultId ?? "unconfigured"
@@ -245,7 +92,17 @@ class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDecorati
         self.parentItemIdentifier = parentIdentifier
         self.filename = filename
         self.contentType = contentType
-        self.capabilities = capabilities
+        var effectiveCapabilities = capabilities
+        if parentIdentifier != .trashContainer && identifier != .rootContainer && identifier != .trashContainer {
+            effectiveCapabilities.insert(.allowsTrashing)
+        }
+        if contentType != .folder && parentIdentifier != .trashContainer {
+            effectiveCapabilities.insert(.allowsEvicting)
+        }
+        if #available(macOS 13.0, *) {
+            effectiveCapabilities.insert(.allowsExcludingFromSync)
+        }
+        self.capabilities = effectiveCapabilities
         self.documentSize = documentSize.map { NSNumber(value: $0) }
         self.contentModificationDate = contentModificationDate
         self.creationDate = creationDate
@@ -254,13 +111,40 @@ class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDecorati
         self.cacheManager = cacheManager
         self.syncManager = syncManager
         
-        // Use modification date and document size as version identifier for robust cache invalidation
-        let timeStr = contentModificationDate?.timeIntervalSince1970.description ?? "0"
-        let sizeStr = documentSize?.description ?? "0"
-        let versionString = remoteETag.map { "etag:\($0)" } ?? "\(timeStr)_\(sizeStr)"
-        let versionData = versionString.data(using: .utf8) ?? Data()
-        self.itemVersion = NSFileProviderItemVersion(contentVersion: versionData, metadataVersion: versionData)
-        
+        let resolvedId = ItemAliasStore.shared.resolve(identifier.rawValue)
+        self.fileId = resolvedId
+        let metadata: FileMetadata?
+        let metadataAvailable: Bool
+        do {
+            metadata = try syncManager.getMetadataPersistent(fileId: resolvedId)
+            metadataAvailable = true
+        } catch {
+            metadata = nil
+            metadataAvailable = false
+        }
+        self.syncMetadata = metadata
+        let directory = metadata?.isDirectory == true || contentType.conforms(to: .directory)
+        let vault = cacheManager.vaultId ?? ""
+        let path = metadata?.remotePath ?? filename
+        let excluded = filename.hasSuffix(".nosync") || metadata?.syncStatus == .localOnly || (!vault.isEmpty && (
+            IgnoreRuleEngine.shared.shouldIgnore(path: path, name: filename, isDirectory: directory, vaultId: vault) ||
+            IgnoreRuleEngine.shared.isUserExcluded(vaultId: vault, path: filename) ||
+            IgnoreRuleEngine.shared.isUserExcluded(vaultId: vault, path: resolvedId) ||
+            IgnoreRuleEngine.shared.isUserExcluded(vaultId: vault, path: path)))
+        self.excludedFromSync = excluded
+        self.cachePolicy = cacheManager.effectivePolicy(fileId: resolvedId)
+        self.snapshotLastUsedDate = cacheManager.getCacheMetadata(fileId: resolvedId)?.lastAccessedAt
+        let localBytes = cacheManager.isCached(fileId: resolvedId) || metadata?.localPath.map { FileManager.default.fileExists(atPath: $0) } == true
+        let state = FileCloudState(metadata: metadata, remoteETag: metadata?.remoteETag ?? remoteETag, hasLocalBytes: localBytes, isDirectory: directory, isExcluded: excluded, metadataAvailable: metadataAvailable)
+        self.cloudState = state
+        let versionString = ContentRevision.token(metadata: metadata, remoteETag: remoteETag, modifiedAt: contentModificationDate, size: documentSize)
+        let versionData = Data(versionString.utf8)
+        // Status-only changes must refresh Finder without invalidating content.
+        // Apple limits each version component to 128 bytes.
+        let metadataVersionString = "v4:\(parentIdentifier.rawValue):\(filename):\(versionString):\(metadata?.syncStatus.rawValue ?? "remote"):\(state.isUploaded):\(state.isUploading):\(state.isDownloaded):\(state.isDownloading):\(state.isMostRecentVersionDownloaded):\(excluded):\(self.cachePolicy.rawValue):\(state.downloadProgress)"
+        let metadataVersionData = Data(SHA256.hash(data: Data(metadataVersionString.utf8)))
+        self.itemVersion = NSFileProviderItemVersion(contentVersion: versionData, metadataVersion: metadataVersionData)
+
         super.init()
     }
     
@@ -268,7 +152,7 @@ class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDecorati
         let identifier = NSFileProviderItemIdentifier(vfsItem.id)
         let parentIdentifier = (vfsItem.parentId == "ROOT" || vfsItem.parentId == "/" || vfsItem.parentId.isEmpty) ? .rootContainer : NSFileProviderItemIdentifier(vfsItem.parentId)
         
-        var capabilities: NSFileProviderItemCapabilities = [.allowsReading, .allowsDeleting, .allowsRenaming, .allowsReparenting]
+        var capabilities: NSFileProviderItemCapabilities = [.allowsReading, .allowsDeleting, .allowsTrashing, .allowsRenaming, .allowsReparenting]
         
         if #available(macOS 13.0, *) {
             capabilities.insert(.allowsExcludingFromSync)
@@ -316,10 +200,10 @@ class FileProviderItem: NSObject, NSFileProviderItem, NSFileProviderItemDecorati
     
     @available(macOS 13.0, *)
     var contentPolicy: NSFileProviderContentPolicy {
-        if cacheManager.effectivePolicy(fileId: fileId) == .pinned || cacheManager.isCached(fileId: fileId) {
+        if cachePolicy == .pinned {
             return .downloadEagerlyAndKeepDownloaded
         }
-        return contentType == .folder ? .inherited : .downloadLazilyAndEvictOnRemoteUpdate
+        return contentType == .folder ? .inherited : .downloadLazily
     }
 }
 
@@ -342,29 +226,9 @@ extension FileProviderItem {
     
     /// Indicates whether the item is fully synced between local and cloud
     var isSynced: Bool {
-        guard itemIdentifier != .rootContainer else {
-            return false
-        }
-        
-        // Items currently syncing are not marked as synced
-        if isUploading || isDownloading {
-            return false
-        }
-        
-        // Check SyncManager status if available
-        if let metadata = syncManager.getMetadata(fileId: fileId) {
-            return metadata.syncStatus == .synced
-        }
-        
-        // For directories without explicit sync metadata, consider synced
-        if contentType == .folder {
-            return true
-        }
-        
-        // For regular files without metadata, consider synced if both cached and uploaded
-        return isDownloaded && isUploaded
+        itemIdentifier != .rootContainer && !cloudState.isPending && !isUploading && !isDownloading && isUploaded && isMostRecentVersionDownloaded && !isExcludedFromSync
     }
-    
+
     var decorations: [NSFileProviderItemDecorationIdentifier]? {
         guard itemIdentifier != .rootContainer else {
             return nil
@@ -372,23 +236,31 @@ extension FileProviderItem {
         
         var result: [NSFileProviderItemDecorationIdentifier] = []
         
-        // 1. Syncing state (uploading / downloading in progress)
-        if isUploading || isDownloading {
-            result.append(NSFileProviderItemDecorationIdentifier("com.clouddrive.decoration.syncing"))
-        } else if isSynced {
-            // 2. Synced state (content is synced between local and remote)
-            result.append(NSFileProviderItemDecorationIdentifier("com.clouddrive.decoration.synced"))
+        // 0. 排除同步状态：展示排除角标
+        if isExcludedFromSync {
+            result.append(NSFileProviderItemDecorationIdentifier("com.clouddrive.decoration.excluded"))
         }
         
-        // 3. Encrypted state (encrypted vault file or Cryptomator ciphertext file)
-        if isEncryptedItem {
-            result.append(NSFileProviderItemDecorationIdentifier("com.clouddrive.decoration.locked"))
+        // 1. 同步错误与冲突状态：展示警告角标
+        if let metadata = syncMetadata {
+            if metadata.syncStatus == .error || metadata.syncStatus == .conflict {
+                result.append(NSFileProviderItemDecorationIdentifier("com.clouddrive.decoration.warning"))
+            } else if cloudState.isPending && !isUploading {
+                // 等待上传排队中状态
+                result.append(NSFileProviderItemDecorationIdentifier("com.clouddrive.decoration.pending"))
+            }
         }
         
-        // 4. Pinned state (Always keep on this device badge)
-        if cacheManager.effectivePolicy(fileId: fileId) == .pinned {
+        // 2. 固定状态（用户显式设置“始终保留在此设备上”）
+        if cachePolicy == .pinned {
             result.append(NSFileProviderItemDecorationIdentifier("com.clouddrive.decoration.pinned"))
         }
+        
+        // 参考原生 iCloud 体验规范：
+        // 1. 锁图标（locked）：全部去除，避免视觉噪点（整个保险库为全量透明加密）。
+        // 2. 已同步本地文件：无任何角标，呈现 macOS 原生纯净图标质感。
+        // 3. 未下载到本地文件：由 isDownloaded == false 驱动 macOS 自动呈现 iCloud 云朵下载图标。
+        // 4. 正在上传/下载文件：由 NSProgress 驱动呈现动态饼图进度圈。
         
         return result.isEmpty ? nil : result
     }

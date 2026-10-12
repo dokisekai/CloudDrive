@@ -2,6 +2,7 @@ import Foundation
 import FileProvider
 import UniformTypeIdentifiers
 import CloudDriveCore
+import CloudDriveRecovery
 
 extension FileProviderExtension {
     func modifyItem(_ item: NSFileProviderItem,
@@ -36,6 +37,7 @@ extension FileProviderExtension {
                 
                 // 1. Retrieve recorded local info prior to changes (to know source parent and previous name)
                 let originalVfsItem = try? self.findItem(identifier: fileId)
+                let initialSaveMetadata = try self.syncManager.getMetadataPersistent(fileId: originalVfsItem?.id ?? fileId)
                 if let originalVfsItem { try self.validateBaseVersion(version, item: originalVfsItem, preserving: newContents) }
                 let oldParentIdentifier: NSFileProviderItemIdentifier?
                 if let oldParent = originalVfsItem?.parentId {
@@ -51,6 +53,64 @@ extension FileProviderExtension {
                 let isRenaming = changedFields.contains(.filename) && (originalVfsItem?.name != item.filename)
                 
                 if isReparenting || isRenaming {
+                    // 2.1 Handle moving item to Trash (.trashContainer)
+                    if item.parentItemIdentifier == .trashContainer {
+                        logInfo(.fileOps, "🗑️ modifyItem: reparenting to .trashContainer -> trashing item: \(fileId)")
+                        guard let vfsItem = originalVfsItem ?? (try? self.findItem(identifier: fileId)) else {
+                            completionHandler(nil, [], false, NSFileProviderError(.noSuchItem))
+                            return
+                        }
+                        logInfo(.fileOps, "🔥 modifyItem: Permanently deleting item: \(vfsItem.name) (\(fileId))")
+                        if vfsItem.isDirectory { try self.preserveLocalEditBeforeDeletion(vfsItem, fileId: fileId) }
+                        let baseline = try self.syncManager.getMetadataPersistent(fileId: fileId)
+                        let remotePath = vfsItem.remotePath ?? baseline?.remotePath ?? ""
+                        if !remotePath.isEmpty && baseline?.syncStatus != .localOnly {
+                            if !vfsItem.isDirectory && (baseline?.syncStatus == .pendingUpload || baseline?.syncStatus == .uploading || self.syncManager.hasPendingUpload(fileId: fileId)) {
+                                let source = baseline?.localPath.map { URL(fileURLWithPath: $0) } ?? self.cacheManager.localPath(for: fileId)
+                                let backups = DeletedPayloadBackupStore(vaultId: self.currentVaultIdentifier)
+                                let backup = try backups.preserve(source: source, fileId: fileId, name: vfsItem.name, parentId: vfsItem.parentId, remotePath: remotePath, expectedETag: baseline?.etag)
+                                let preserved = try backups.payload(for: backup.id, verifyIntegrity: false)
+                                var tombstone = baseline ?? FileMetadata(fileId: fileId, name: vfsItem.name, parentId: vfsItem.parentId, isDirectory: false, syncStatus: .pendingDelete, remotePath: remotePath)
+                                tombstone.localPath = preserved.path
+                                tombstone.syncStatus = .pendingDelete
+                                try self.syncManager.updateMetadataPersistent(tombstone)
+                            }
+                            try self.syncManager.enqueuePersistent(.deleteItem(
+                                fileId: fileId,
+                                remotePath: remotePath,
+                                isDirectory: vfsItem.isDirectory,
+                                directoryId: vfsItem.isDirectory && self.vfs.isEncrypted ? fileId : nil,
+                                vaultId: self.currentVaultIdentifier
+                            ))
+                        }
+                        self.vfs.deleteFromLocalDatabaseOnly(itemId: fileId)
+                        if vfsItem.isDirectory {
+                            self.cacheManager.removeDirectoryCache(forDirectoryPrefix: fileId)
+                        } else {
+                            try? self.cacheManager.removeCachedFile(fileId: fileId)
+                        }
+                        ThumbnailManager.shared.invalidate(fileId: self.thumbnailIdentifier(fileId))
+                        if let oldParent = oldParentIdentifier {
+                            self.signalEnumeratorDebounced(for: oldParent)
+                        }
+                        self.signalEnumeratorDebounced(for: .workingSet)
+                        
+                        let trashedItem = self.makeItem(
+                            identifier: item.itemIdentifier,
+                            parentIdentifier: .trashContainer,
+                            filename: vfsItem.name,
+                            contentType: vfsItem.isDirectory ? .folder : .data,
+                            capabilities: [.allowsReading, .allowsDeleting, .allowsReparenting],
+                            documentSize: vfsItem.size > 0 ? vfsItem.size : nil,
+                            contentModificationDate: vfsItem.modifiedAt,
+                            creationDate: vfsItem.modifiedAt,
+                            isEncrypted: self.vfs.isEncrypted
+                        )
+                        progress.completedUnitCount = 100
+                        completionHandler(trashedItem, [], false, nil)
+                        return
+                    }
+                    
                     let targetParentRaw = item.parentItemIdentifier.rawValue
                     let actualTargetParentId: String
                     if item.parentItemIdentifier == .rootContainer || targetParentRaw == "ROOT" {
@@ -78,6 +138,70 @@ extension FileProviderExtension {
                     )
                     currentVfsItem = movedItem
                     logSuccess(.fileOps, "✅ FileProvider: Move/rename succeeded: \(movedItem.name) (New ID: \(movedItem.id))")
+
+                    if isRenaming, let newName = newName {
+                        let oldName = originalVfsItem?.name ?? ""
+                        if newName.hasSuffix(".nosync") && !oldName.hasSuffix(".nosync") {
+                            // Renamed to .nosync: exclude from sync
+                            self.syncManager.removePendingUploads(for: fileId)
+                            self.syncManager.removePendingUploads(for: movedItem.id)
+                            var meta = self.syncManager.getMetadata(fileId: movedItem.id) ?? FileMetadata(
+                                fileId: movedItem.id,
+                                name: newName,
+                                parentId: movedItem.parentId,
+                                isDirectory: movedItem.isDirectory,
+                                syncStatus: .localOnly,
+                                localPath: movedItem.localPath,
+                                size: movedItem.size
+                            )
+                            meta.syncStatus = .localOnly
+                            self.syncManager.updateMetadata(meta)
+                            let relPath = movedItem.parentId == "ROOT" ? newName : "\(movedItem.parentId)/\(newName)"
+                            IgnoreRuleEngine.shared.setUserExcluded(vaultId: self.currentVaultIdentifier, path: relPath, isExcluded: true)
+                            logInfo(.sync, "🚫 modifyItem: Renamed to .nosync, set to localOnly: \(newName)")
+                        } else if oldName.hasSuffix(".nosync") && !newName.hasSuffix(".nosync") {
+                            // Renamed away from .nosync: resume sync
+                            let oldRelPath = (originalVfsItem?.parentId ?? "ROOT") == "ROOT" ? oldName : "\(originalVfsItem?.parentId ?? "")/\(oldName)"
+                            let newRelPath = movedItem.parentId == "ROOT" ? newName : "\(movedItem.parentId)/\(newName)"
+                            IgnoreRuleEngine.shared.setUserExcluded(vaultId: self.currentVaultIdentifier, path: oldRelPath, isExcluded: false)
+                            IgnoreRuleEngine.shared.setUserExcluded(vaultId: self.currentVaultIdentifier, path: newRelPath, isExcluded: false)
+                            var meta = self.syncManager.getMetadata(fileId: movedItem.id) ?? FileMetadata(
+                                fileId: movedItem.id,
+                                name: newName,
+                                parentId: movedItem.parentId,
+                                isDirectory: movedItem.isDirectory,
+                                syncStatus: .pendingUpload,
+                                localPath: movedItem.localPath,
+                                size: movedItem.size
+                            )
+                            meta.syncStatus = .pendingUpload
+                            self.syncManager.updateMetadata(meta)
+                            if !movedItem.isDirectory {
+                                let cacheURL = self.cacheManager.localPath(for: movedItem.id)
+                                if FileManager.default.fileExists(atPath: cacheURL.path) {
+                                    let staged = try PendingContentStager(vaultId: self.currentVaultIdentifier).stage(cacheURL, filename: newName)
+                                    if self.vfs.isEncrypted {
+                                        try self.syncManager.enqueuePersistent(.encryptedUpload(
+                                            fileId: movedItem.id,
+                                            fileName: newName,
+                                            parentId: movedItem.parentId,
+                                            localPath: staged.path,
+                                            vaultId: self.currentVaultIdentifier
+                                        ))
+                                    } else {
+                                        let remotePath = movedItem.parentId == "ROOT" ? "/\(newName)" : "\(movedItem.parentId)/\(newName)"
+                                        try self.syncManager.enqueuePersistent(.upload(
+                                            fileId: movedItem.id,
+                                            localPath: staged.path,
+                                            remotePath: remotePath
+                                        ))
+                                    }
+                                }
+                            }
+                            self.syncManager.processSyncQueue()
+                            logInfo(.sync, "🔄 modifyItem: Renamed from .nosync, queued for sync: \(newName)")
+                        }
+                    }
                     
                     // Signal enumerators for target directory, source directory, and working set
                     self.signalEnumeratorDebounced(for: item.parentItemIdentifier)
@@ -96,7 +220,7 @@ extension FileProviderExtension {
                     if let policy = item.contentPolicy {
                         if policy == .downloadEagerlyAndKeepDownloaded {
                             self.cacheManager.pinFile(fileId: fileId)
-                        } else if policy == .downloadLazilyAndEvictOnRemoteUpdate {
+                        } else {
                             if self.cacheManager.getCacheMetadata(fileId: fileId)?.policy == .pinned {
                                 self.cacheManager.unpinFile(fileId: fileId)
                             }
@@ -119,87 +243,65 @@ extension FileProviderExtension {
                     
                     let effectiveFileId = currentVfsItem?.id ?? fileId
                     
-                    // 1. Stage updated content in pending_uploads
                     let savedLocalURL = try PendingContentStager(vaultId: currentVaultIdentifier).stage(newContents, filename: item.filename)
                     let effectivePath = savedLocalURL.path
-                    let newSize = (try? FileManager.default.attributesOfItem(atPath: effectivePath)[.size] as? Int64) ?? 0
-                    
-                    // 2. Cache updated content locally
-                    try? self.cacheManager.cacheFile(fileId: effectiveFileId, from: newContents, policy: .automatic)
-                    ThumbnailManager.shared.invalidate(fileId: self.thumbnailIdentifier(effectiveFileId))
-                    
-                    // 3. Update local VFS database record
+                    let newSize = (try FileManager.default.attributesOfItem(atPath: effectivePath)[.size] as? NSNumber)?.int64Value ?? 0
                     let existingRemotePath = currentVfsItem?.remotePath ?? effectiveFileId
-                    self.vfs.recordOfflineFile(
-                        id: effectiveFileId,
-                        name: item.filename,
-                        parentId: actualParentId,
-                        size: newSize,
-                        remotePath: existingRemotePath
-                    )
-                    
-                    // 4. Preserve the downloaded remote revision for conditional upload.
-                    let baseline = self.syncManager.getMetadata(fileId: effectiveFileId)
-                    self.syncManager.updateMetadata(FileMetadata(
-                        fileId: effectiveFileId,
-                        name: item.filename,
-                        parentId: actualParentId,
-                        isDirectory: false,
-                        syncStatus: .pendingUpload,
-                        localPath: self.cacheManager.localPath(for: effectiveFileId).path,
-                        remotePath: existingRemotePath,
-                        size: newSize,
-                        localModifiedAt: Date(),
-                        remoteModifiedAt: baseline?.remoteModifiedAt,
-                        etag: baseline?.etag,
-                        downloadProgress: 1.0,
-                        lastSyncTime: baseline?.lastSyncTime
-                    ))
-                    
-                    // 5. Update local in-memory representation
-                    currentVfsItem = VirtualFileItem(
-                        id: effectiveFileId,
-                        name: item.filename,
-                        isDirectory: false,
-                        size: newSize,
-                        modifiedAt: Date(),
-                        parentId: actualParentId,
-                        syncStatus: .pendingUpload,
-                        localPath: self.cacheManager.localPath(for: effectiveFileId).path,
-                        remotePath: existingRemotePath
-                    )
-                    
-                    // 6. Signal enumerators
+                    try self.syncManager.withJournalCommit {
+                        let baseline = try self.syncManager.getMetadataPersistent(fileId: effectiveFileId)
+                        let checkPath = actualParentId == "ROOT" ? item.filename : "\(actualParentId)/\(item.filename)"
+                        let isExcluded = item.filename.hasSuffix(".nosync")
+                            || baseline?.syncStatus == .localOnly
+                            || IgnoreRuleEngine.shared.isUserExcluded(vaultId: self.currentVaultIdentifier, path: item.filename)
+                            || IgnoreRuleEngine.shared.isUserExcluded(vaultId: self.currentVaultIdentifier, path: checkPath)
+                            || IgnoreRuleEngine.shared.shouldIgnore(path: existingRemotePath, name: item.filename, isDirectory: false, vaultId: self.currentVaultIdentifier)
+                        let status: SyncStatus = isExcluded ? .localOnly : .pendingUpload
+                        let etag = self.requestedETag(version, fileId: effectiveFileId) ?? baseline?.etag
+                        let accepted = FileMetadata(fileId: effectiveFileId, name: item.filename, parentId: actualParentId, isDirectory: false, syncStatus: status, localPath: effectivePath, remotePath: existingRemotePath, size: newSize, localModifiedAt: Date(), remoteModifiedAt: baseline?.remoteModifiedAt, etag: etag, downloadProgress: 1, lastSyncTime: baseline?.lastSyncTime)
+                        let operation: SyncOperation?
+                        if isExcluded { operation = nil }
+                        else if self.vfs.isEncrypted {
+                            operation = .encryptedUpload(fileId: effectiveFileId, fileName: item.filename, parentId: actualParentId, localPath: effectivePath, vaultId: self.currentVaultIdentifier)
+                        } else {
+                            let path = existingRemotePath.hasPrefix("/") ? existingRemotePath : (actualParentId == "ROOT" ? "/\(item.filename)" : "\(actualParentId.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/\(item.filename)")
+                            operation = .upload(fileId: effectiveFileId, localPath: effectivePath, remotePath: path.hasPrefix("/") ? path : "/" + path)
+                        }
+                        try self.syncManager.acceptSavePersistent(metadata: accepted, operation: operation, expectedETag: etag) {
+                            if let original = originalVfsItem, let current = currentVfsItem,
+                               original.id != current.id || original.name != current.name || original.parentId != current.parentId {
+                                // This request may rename and save together. Its own rename
+                                // changes the identity, but never authorizes replacing a
+                                // local content generation accepted by another request.
+                                let latest = try self.syncManager.getMetadataPersistent(fileId: effectiveFileId)
+                                guard latest?.localModifiedAt == initialSaveMetadata?.localModifiedAt,
+                                      latest?.size == initialSaveMetadata?.size else {
+                                    _ = try DeletedPayloadBackupStore(vaultId: self.currentVaultIdentifier).preserve(source: savedLocalURL, fileId: effectiveFileId, name: item.filename, parentId: actualParentId, remotePath: existingRemotePath, expectedETag: etag)
+                                    throw NSFileProviderError(.versionNoLongerAvailable)
+                                }
+                            } else if let current = currentVfsItem ?? originalVfsItem {
+                                try self.validateBaseVersion(version, item: current, preserving: savedLocalURL)
+                            }
+                        }
+                        // Cache and listing publication share the accepted generation's
+                        // lock. A late earlier request cannot overwrite a newer cache.
+                        do {
+                            try self.cacheManager.cacheFile(fileId: effectiveFileId, from: savedLocalURL, policy: .automatic)
+                            if var published = try self.syncManager.getMetadataPersistent(fileId: effectiveFileId), published.localPath == effectivePath {
+                                published.localPath = self.cacheManager.localPath(for: effectiveFileId).path
+                                try self.syncManager.updateMetadataPersistent(published)
+                            }
+                        } catch {
+                            // The accepted immutable stage remains authoritative if cache
+                            // publication or its metadata confirmation cannot complete.
+                            logWarning(.sync, "Saved edit retained in staging after cache publication failure: \(error.localizedDescription)")
+                        }
+                        self.vfs.recordOfflineFile(id: effectiveFileId, name: item.filename, parentId: actualParentId, size: newSize, remotePath: existingRemotePath)
+                        currentVfsItem = VirtualFileItem(id: effectiveFileId, name: item.filename, isDirectory: false, size: newSize, modifiedAt: accepted.localModifiedAt ?? Date(), parentId: actualParentId, syncStatus: status, localPath: effectivePath, remotePath: existingRemotePath, etag: etag)
+                    }
+                    ThumbnailManager.shared.invalidate(fileId: self.thumbnailIdentifier(effectiveFileId))
                     self.signalEnumeratorDebounced(for: item.parentItemIdentifier)
                     self.signalEnumeratorDebounced(for: .workingSet)
-                    
-                    // 7. Queue asynchronous background upload
-                    if self.vfs.isEncrypted {
-                        try self.syncManager.enqueuePersistent(.encryptedUpload(
-                            fileId: effectiveFileId,
-                            fileName: item.filename,
-                            parentId: actualParentId,
-                            localPath: effectivePath,
-                            vaultId: self.currentVaultIdentifier
-                        ))
-                    } else {
-                        let remotePath: String
-                        if !existingRemotePath.isEmpty && existingRemotePath.hasPrefix("/") {
-                            remotePath = existingRemotePath
-                        } else if actualParentId == "ROOT" {
-                            remotePath = "/\(item.filename)"
-                        } else if actualParentId.hasSuffix("/") {
-                            remotePath = "\(actualParentId)\(item.filename)"
-                        } else {
-                            remotePath = "\(actualParentId)/\(item.filename)"
-                        }
-                        try self.syncManager.enqueuePersistent(.upload(
-                            fileId: effectiveFileId,
-                            localPath: effectivePath,
-                            remotePath: remotePath
-                        ))
-                    }
-                    logSuccess(.fileOps, "✅ modifyItem: File content staged locally & queued for async upload: \(item.filename)")
+
                 }
 
             // 4. Return latest item metadata to system
@@ -212,7 +314,7 @@ extension FileProviderExtension {
                     parentIdentifier: item.parentItemIdentifier,
                     filename: item.filename,
                     contentType: item.contentType ?? .data,
-                    capabilities: [.allowsReading, .allowsWriting, .allowsDeleting, .allowsRenaming, .allowsReparenting],
+                    capabilities: [.allowsReading, .allowsWriting, .allowsDeleting, .allowsTrashing, .allowsRenaming, .allowsReparenting, .allowsEvicting],
                     documentSize: item.documentSize as? Int64,
                     contentModificationDate: Date(),
                     creationDate: Date(),
@@ -236,7 +338,7 @@ extension FileProviderExtension {
             completionHandler(nil, [], false, error)
         } catch {
             logError(.fileOps, "❌ FileProvider: Unknown error in modifyItem: \(error)")
-            let fpError = NSFileProviderError(.cannotSynchronize)
+            let fpError = mapToFileProviderError(error)
             progress.completedUnitCount = 100
             completionHandler(nil, [], false, fpError)
         }

@@ -35,13 +35,14 @@ func mapToFileProviderError(_ error: Error) -> NSFileProviderError {
         case .notConfigured: return NSFileProviderError(.providerNotFound)
         case .notFound: return NSFileProviderError(.noSuchItem)
         case .invalidOperation: return NSFileProviderError(.filenameCollision)
-        case .fileSystemError: return NSFileProviderError(.cannotSynchronize)
+        case .fileSystemError: return NSFileProviderError(.serverUnreachable)
         case .permissionDenied, .authenticationFailed: return NSFileProviderError(.notAuthenticated)
+        case .indeterminateMutation: return NSFileProviderError(.cannotSynchronize)
         case .networkError: return NSFileProviderError(.serverUnreachable)
         case .serverError(let statusCode, _):
             if statusCode == 412 { return NSFileProviderError(.filenameCollision) }
             return NSFileProviderError(.serverUnreachable)
-        case .notSupported: return NSFileProviderError(.cannotSynchronize)
+        case .notSupported: return NSFileProviderError(.noSuchItem)
         @unknown default: return NSFileProviderError(.serverUnreachable)
         }
     }
@@ -50,12 +51,12 @@ func mapToFileProviderError(_ error: Error) -> NSFileProviderError {
         switch vfsError {
         case .vaultLocked, .invalidPassword: return NSFileProviderError(.notAuthenticated)
         case .parentNotFound, .fileNotFound, .itemNotFound, .invalidPath, .vaultNotFound: return NSFileProviderError(.noSuchItem)
-        case .encryptionFailed, .decryptionFailed, .directoryCreationFailed: return NSFileProviderError(.cannotSynchronize)
+        case .encryptionFailed, .decryptionFailed, .directoryCreationFailed: return NSFileProviderError(.serverUnreachable)
         case .fileOperationFailed(let msg):
             if msg.contains("412") || msg.contains("collision") || msg.contains("invalidOperation") {
                 return NSFileProviderError(.filenameCollision)
             }
-            return NSFileProviderError(.cannotSynchronize)
+            return NSFileProviderError(.serverUnreachable)
         case .databaseError, .networkError: return NSFileProviderError(.serverUnreachable)
         case .authenticationFailed: return NSFileProviderError(.notAuthenticated)
         case .storageNotConfigured: return NSFileProviderError(.providerNotFound)
@@ -71,9 +72,9 @@ func mapToFileProviderError(_ error: Error) -> NSFileProviderError {
         case .serverError(let code):
             if code == 404 { return NSFileProviderError(.noSuchItem) }
             else if code == 401 || code == 403 { return NSFileProviderError(.notAuthenticated) }
-            else if code == 409 { return NSFileProviderError(.cannotSynchronize) }
+            else if code == 409 { return NSFileProviderError(.serverUnreachable) }
             else if code == 412 { return NSFileProviderError(.filenameCollision) }
-            else if code == 423 { return NSFileProviderError(.cannotSynchronize) }
+            else if code == 423 { return NSFileProviderError(.serverUnreachable) }
             return NSFileProviderError(.serverUnreachable)
         case .authenticationFailed: return NSFileProviderError(.notAuthenticated)
         case .fileNotFound: return NSFileProviderError(.noSuchItem)
@@ -86,7 +87,7 @@ func mapToFileProviderError(_ error: Error) -> NSFileProviderError {
         switch cryptoError {
         case .notFound: return NSFileProviderError(.noSuchItem)
         case .networkError: return NSFileProviderError(.serverUnreachable)
-        case .invalidDirId, .invalidCiphertextName, .corruptedVault: return NSFileProviderError(.cannotSynchronize)
+        case .invalidDirId, .invalidCiphertextName, .corruptedVault: return NSFileProviderError(.serverUnreachable)
         @unknown default: return NSFileProviderError(.serverUnreachable)
         }
     }

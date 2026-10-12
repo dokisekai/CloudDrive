@@ -4,12 +4,10 @@ import CloudDriveSupport
 
 extension WebDAVClient {
     public func testConnection() async throws -> Bool {
-        guard let baseURL = baseURL else {
-            throw WebDAVError.notConfigured
-        }
+        let baseURL = try buildURL(for: "/")
         
         print("🔍 WebDAV: Testing connection...")
-        print("📡 WebDAV: Server address: \(baseURL.absoluteString)")
+        print("📡 WebDAV: Server host: \(baseURL.host ?? "")")
         
         // 使用 PROPFIND 测试根目录访问
         var request = URLRequest(url: baseURL)
@@ -19,16 +17,10 @@ extension WebDAVClient {
         request.timeoutInterval = 10 // 10秒超时
         
         // 添加认证
-        if let credentials = credentials {
-            let authString = "\(credentials.user!):\(credentials.password!)"
-            if let authData = authString.data(using: .utf8) {
-                let base64Auth = authData.base64EncodedString()
-                request.setValue("Basic \(base64Auth)", forHTTPHeaderField: "Authorization")
-            }
-        }
+        addAuthentication(to: &request)
         
         do {
-            let (_, response) = try await WebDAVRetryPolicy.perform { try await session.data(for: request) }
+            let (_, response) = try await WebDAVRetryPolicy.perform { try await boundedResponse(for: request) }
             
             guard let httpResponse = response as? HTTPURLResponse else {
                 print("❌ WebDAV: Invalid response")

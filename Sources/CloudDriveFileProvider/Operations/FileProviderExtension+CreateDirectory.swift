@@ -8,6 +8,56 @@ extension FileProviderExtension {
         logInfo(.fileOps, "📁 FileProvider: Creating directory")
         logInfo(.fileOps, "   Calling: vfs.createDirectory(name: \(itemTemplate.filename), parentId: \(actualParentId))")
         
+        let checkPath = actualParentId == "ROOT" ? itemTemplate.filename : "\(actualParentId)/\(itemTemplate.filename)"
+        let vaultId = self.currentVaultIdentifier
+        let isExcluded = itemTemplate.filename.hasSuffix(".nosync")
+            || IgnoreRuleEngine.shared.shouldIgnore(path: checkPath, name: itemTemplate.filename, isDirectory: true, vaultId: vaultId)
+            || IgnoreRuleEngine.shared.isUserExcluded(vaultId: vaultId, path: itemTemplate.filename)
+            || IgnoreRuleEngine.shared.isUserExcluded(vaultId: vaultId, path: checkPath)
+
+        if isExcluded {
+            logInfo(.fileOps, "📁 FileProvider: Creating directory locally as .localOnly (excluded from sync): \(itemTemplate.filename)")
+            let dirId: String
+            let remotePath: String
+            if self.vfs.isEncrypted {
+                dirId = UUID().uuidString
+                remotePath = dirId
+            } else {
+                remotePath = actualParentId == "ROOT" ? "/\(itemTemplate.filename)" : "\(actualParentId)/\(itemTemplate.filename)"
+                dirId = remotePath
+            }
+            
+            self.vfs.recordOfflineDirectory(id: dirId, name: itemTemplate.filename, parentId: actualParentId, remotePath: remotePath)
+            self.syncManager.updateMetadata(FileMetadata(
+                fileId: dirId,
+                name: itemTemplate.filename,
+                parentId: actualParentId,
+                isDirectory: true,
+                syncStatus: .localOnly,
+                remotePath: remotePath,
+                localModifiedAt: Date(),
+                remoteModifiedAt: Date()
+            ))
+            
+            let vfsItem = VirtualFileItem(
+                id: dirId,
+                name: itemTemplate.filename,
+                isDirectory: true,
+                size: 0,
+                modifiedAt: Date(),
+                parentId: actualParentId,
+                syncStatus: .localOnly,
+                remotePath: remotePath
+            )
+            let item = self.makeItem(vfsItem: vfsItem, isEncrypted: self.vfs.isEncrypted)
+            progress.completedUnitCount = 100
+            self.signalEnumeratorDebounced(for: itemTemplate.parentItemIdentifier)
+            self.signalEnumeratorDebounced(for: .workingSet)
+            completionHandler(item, [], false, nil)
+            logSuccess(.fileOps, "✅ Excluded directory created locally: \(itemTemplate.filename)")
+            return
+        }
+        
         let operationId = operationManager.addOperation(
             type: .create,
             fileName: itemTemplate.filename,
@@ -93,10 +143,11 @@ extension FileProviderExtension {
                 parentIdentifier: itemTemplate.parentItemIdentifier,
                 filename: itemTemplate.filename,
                 contentType: .folder,
-                capabilities: [.allowsReading, .allowsWriting, .allowsRenaming, .allowsDeleting, .allowsReparenting, .allowsAddingSubItems, .allowsContentEnumerating],
+                capabilities: [.allowsReading, .allowsWriting, .allowsRenaming, .allowsDeleting, .allowsTrashing, .allowsReparenting, .allowsAddingSubItems, .allowsContentEnumerating],
                 documentSize: nil,
                 contentModificationDate: Date(),
-                creationDate: Date()
+                creationDate: Date(),
+                isEncrypted: self.vfs.isEncrypted
             )
             
             self.signalEnumeratorDebounced(for: itemTemplate.parentItemIdentifier)

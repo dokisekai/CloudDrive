@@ -12,6 +12,15 @@ import Foundation
 import Combine
 
 /// 软件级别全局配置中心
+/// 缓存管理模式
+public enum CacheManagementMode: String, CaseIterable, Identifiable, Sendable {
+    case smart = "smart"    // 智能模式 (基于设备物理磁盘剩余空间百分比，iCloud 风格)
+    case fixed = "fixed"    // 固定配额模式 (经典固定大小限制)
+    
+    public var id: String { rawValue }
+}
+
+/// 软件级别全局配置中心
 public final class AppSettings: ObservableObject, @unchecked Sendable {
     public static let shared = AppSettings()
     
@@ -29,6 +38,8 @@ public final class AppSettings: ObservableObject, @unchecked Sendable {
         public static let autoLock = "app_auto_lock"
         public static let autoLockTimeout = "app_auto_lock_timeout"
         public static let maxCacheQuotaBytes = "clouddrive_max_cache_size"
+        public static let cacheManagementMode = "app_cache_management_mode"
+        public static let smartFreeSpacePercentage = "app_smart_free_space_percentage"
         public static let enableBuiltinIgnoreRules = "app_enable_builtin_ignore_rules"
         public static let globalIgnorePatterns = "app_global_ignore_patterns"
     }
@@ -78,6 +89,16 @@ public final class AppSettings: ObservableObject, @unchecked Sendable {
         }
     }
     
+    /// 缓存管理模式（默认智能自适应模式）
+    @Published public var cacheManagementMode: CacheManagementMode {
+        didSet { save(key: Keys.cacheManagementMode, value: cacheManagementMode.rawValue) }
+    }
+    
+    /// 智能模式下保持的 Mac 最小剩余可用空间百分比（默认 15%）
+    @Published public var smartFreeSpacePercentage: Int {
+        didSet { save(key: Keys.smartFreeSpacePercentage, value: smartFreeSpacePercentage) }
+    }
+    
     /// 启用软件内置忽略规则（如 .DS_Store, Thumbs.db 等）
     @Published public var enableBuiltinIgnoreRules: Bool {
         didSet { save(key: Keys.enableBuiltinIgnoreRules, value: enableBuiltinIgnoreRules) }
@@ -111,7 +132,7 @@ public final class AppSettings: ObservableObject, @unchecked Sendable {
             ?? defaults.object(forKey: "showNotifications") as? Bool ?? true
         
         self.autoLock = defaults.object(forKey: Keys.autoLock) as? Bool
-            ?? defaults.object(forKey: "autoLock") as? Bool ?? true
+            ?? defaults.object(forKey: "autoLock") as? Bool ?? false
         
         self.autoLockTimeout = defaults.object(forKey: Keys.autoLockTimeout) as? Double
             ?? defaults.object(forKey: "autoLockTimeout") as? Double ?? 15.0
@@ -121,6 +142,10 @@ public final class AppSettings: ObservableObject, @unchecked Sendable {
         } else {
             self.maxCacheQuotaGB = 10
         }
+        
+        let modeRaw = defaults.string(forKey: Keys.cacheManagementMode) ?? CacheManagementMode.smart.rawValue
+        self.cacheManagementMode = CacheManagementMode(rawValue: modeRaw) ?? .smart
+        self.smartFreeSpacePercentage = defaults.object(forKey: Keys.smartFreeSpacePercentage) as? Int ?? 15
         
         self.enableBuiltinIgnoreRules = defaults.object(forKey: Keys.enableBuiltinIgnoreRules) as? Bool ?? true
         
@@ -152,9 +177,11 @@ public final class AppSettings: ObservableObject, @unchecked Sendable {
         autoMountOnLaunch = true
         confirmBeforeUnmount = true
         showNotifications = true
-        autoLock = true
+        autoLock = false
         autoLockTimeout = 15.0
         maxCacheQuotaGB = 10
+        cacheManagementMode = .smart
+        smartFreeSpacePercentage = 15
         enableBuiltinIgnoreRules = true
         globalIgnorePatterns = [
             ".DS_Store",

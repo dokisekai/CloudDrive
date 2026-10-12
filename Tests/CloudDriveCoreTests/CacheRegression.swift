@@ -1,6 +1,8 @@
 import Foundation
 import CloudDriveCore
 import CloudDriveStorage
+import CloudDriveSupport
+import CloudDriveCache
 
 private final class CacheRegressionNetwork: NetworkMonitorServiceProtocol, @unchecked Sendable {
     var currentStatus: NetworkStatus { .offline }
@@ -122,6 +124,33 @@ public func runCacheRegressionTests() async throws {
     try check(reconService.isCached(fileId: "unprefixed_id.txt"), "Reconciler must preserve non-prefixed cached files")
     try check(reconService.isCached(fileId: "/prefixed_id.txt"), "Reconciler must preserve prefixed cached files")
     try check(reconService.currentCacheSize() >= 20, "currentCacheSize remains accurate after reconcile (got \(reconService.currentCacheSize()))")
+
+    // Smart Cache & Pinned File Independence Regressions
+    let disk = DiskSpaceHelper.currentDiskSpace()
+    try check(disk.totalBytes > 0 && disk.availableBytes > 0, "DiskSpaceHelper detects non-zero Mac disk capacity")
+    try check(!disk.summary.isEmpty, "DiskSpaceHelper produces human-readable summary")
+
+    let (smartService, _) = makeService("smart_isolation", maximum: 50)
+    let pinnedData = Data("pinned-essential-data-that-must-never-be-evicted".utf8) // 48 bytes
+    let dynamicData = Data("dynamic-temporary-data-for-online-stream-read".utf8) // 45 bytes
+    
+    try smartService.cacheFile(fileId: "/keep-pinned.pdf", data: pinnedData)
+    smartService.pinFile(fileId: "/keep-pinned.pdf")
+    try smartService.cacheFile(fileId: "/temp-read.mp4", data: dynamicData)
+    
+    let dynamicStats = smartService.getDynamicCacheStatistics()
+    let pinnedStats = smartService.getPinnedCacheStatistics()
+    try check(pinnedStats.fileCount == 1 && pinnedStats.totalSize == Int64(pinnedData.count), "Pinned cache stats strictly isolate pinned files")
+    try check(dynamicStats.fileCount == 1 && dynamicStats.totalSize == Int64(dynamicData.count), "Dynamic cache stats strictly isolate temporary files")
+
+    // Verify eviction under pressure:
+    // Dynamic file exceeds limit (50), so dynamic file is evicted, but pinned file is 100% immune!
+    try smartService.cleanupIfNeeded()
+    try check(smartService.isCached(fileId: "/keep-pinned.pdf"), "Pinned file is immune to quota eviction")
+    
+    // clearAllCache() also preserves pinned files
+    try smartService.clearAllCache()
+    try check(smartService.isCached(fileId: "/keep-pinned.pdf"), "clearAllCache preserves pinned downloads")
 
     print("  ✅ Cache regression: \(checks) checks passed")
 }

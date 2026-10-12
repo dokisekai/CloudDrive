@@ -3,6 +3,7 @@ import CryptomatorCryptoLib
 
 extension VirtualFileSystem {
     public func unlockVault(password: String, storagePath: String, vaultId: String) async throws {
+        self.currentVaultId = vaultId
         print("🔓 [VFS] Unlocking vault")
         print("   Vault ID: \(vaultId)")
         print("   Storage path: \(storagePath)")
@@ -12,21 +13,96 @@ extension VirtualFileSystem {
         }
         
         let vaultPath = await resolveVaultPath(storagePath: storagePath, vaultId: vaultId)
-        let cleanVaultPath = vaultPath == "/" ? "" : (vaultPath.hasSuffix("/") ? String(vaultPath.dropLast()) : vaultPath)
-        print("📁 [VFS] Resolved vault path: '\(cleanVaultPath.isEmpty ? "/" : cleanVaultPath)'")
+        var resolvedVaultPath = vaultPath == "/" ? "" : (vaultPath.hasSuffix("/") ? String(vaultPath.dropLast()) : vaultPath)
+        print("📁 [VFS] Resolved vault path: '\(resolvedVaultPath.isEmpty ? "/" : resolvedVaultPath)'")
         
-        let configPath = "\(cleanVaultPath)/vault.cryptomator"
-        let masterkeyPath = "\(cleanVaultPath)/masterkey.cryptomator"
-        let saltPath = "\(cleanVaultPath)/salt"
+        var configPath = "\(resolvedVaultPath)/vault.cryptomator"
+        var masterkeyPath = "\(resolvedVaultPath)/masterkey.cryptomator"
+        let saltPath = "\(resolvedVaultPath)/salt"
         
         var masterKey: Masterkey? = nil
         var detectedScheme: CryptorScheme = .sivGcm
         var shorteningThreshold: Int = 220
         let tempDir = FileManager.default.temporaryDirectory
         
-        let hasConfig = (try? await storageClient.exists(path: configPath)) ?? false
-        let hasMasterkey = (try? await storageClient.exists(path: masterkeyPath)) ?? false
+        do {
+            let rootItems = try await storageClient.listDirectory(path: "/")
+            let names = rootItems.map { "\($0.displayName)(\($0.isDirectory ? "dir" : "file"))" }
+            logInfo(.system, "📂 [VFS DEBUG] Remote Root '/' items: \(names)")
+        } catch {
+            logError(.system, "❌ [VFS DEBUG] Failed to list Remote Root '/': \(error)")
+        }
+        if !resolvedVaultPath.isEmpty {
+            do {
+                let subItems = try await storageClient.listDirectory(path: resolvedVaultPath)
+                let subNames = subItems.map { "\($0.displayName)(\($0.isDirectory ? "dir" : "file"))" }
+                logInfo(.system, "📂 [VFS DEBUG] Remote '\(resolvedVaultPath)' items: \(subNames)")
+            } catch {
+                logError(.system, "❌ [VFS DEBUG] Failed to list Remote '\(resolvedVaultPath)': \(error)")
+            }
+        }
+
+        var hasConfig = (try? await storageClient.exists(path: configPath)) ?? false
+        var hasMasterkey = (try? await storageClient.exists(path: masterkeyPath)) ?? false
         logInfo(.system, "🔍 [VFS] Checking vault files existence - configPath: \(configPath) (exists: \(hasConfig)), masterkeyPath: \(masterkeyPath) (exists: \(hasMasterkey))")
+        
+        // 自愈容错：如果指定子目录未找到配置或密钥，自动探测根目录是否有 masterkey/config
+        if !hasConfig && !hasMasterkey && !resolvedVaultPath.isEmpty {
+            let rootConfig = "/vault.cryptomator"
+            let rootMK = "/masterkey.cryptomator"
+            let rootHasConfig = (try? await storageClient.exists(path: rootConfig)) ?? false
+            let rootHasMK = (try? await storageClient.exists(path: rootMK)) ?? false
+            if rootHasConfig || rootHasMK {
+                print("🔄 [VFS] Auto-healing: Found vault configuration at root directory instead of '\(resolvedVaultPath)'")
+                logInfo(.system, "🔄 [VFS] Auto-healing: Found vault configuration at root directory instead of '\(resolvedVaultPath)'")
+                resolvedVaultPath = ""
+                configPath = rootConfig
+                masterkeyPath = rootMK
+                hasConfig = rootHasConfig
+                hasMasterkey = rootHasMK
+            } else {
+                let lastComponent = (resolvedVaultPath as NSString).lastPathComponent
+                if !lastComponent.isEmpty && lastComponent != "/" {
+                    let dupConfig = "\(resolvedVaultPath)/\(lastComponent)/vault.cryptomator"
+                    let dupMK = "\(resolvedVaultPath)/\(lastComponent)/masterkey.cryptomator"
+                    let dupHasConfig = (try? await storageClient.exists(path: dupConfig)) ?? false
+                    let dupHasMK = (try? await storageClient.exists(path: dupMK)) ?? false
+                    if dupHasConfig || dupHasMK {
+                        print("🔄 [VFS] Auto-healing: Found vault configuration at nested duplicate directory '\(resolvedVaultPath)/\(lastComponent)'")
+                        logInfo(.system, "🔄 [VFS] Auto-healing: Found vault configuration at nested duplicate directory '\(resolvedVaultPath)/\(lastComponent)'")
+                        resolvedVaultPath = "\(resolvedVaultPath)/\(lastComponent)"
+                        configPath = dupConfig
+                        masterkeyPath = dupMK
+                        hasConfig = dupHasConfig
+                        hasMasterkey = dupHasMK
+                    }
+                }
+            }
+        }
+        
+        // 自愈创建：若远端目录完全未初始化（既无 vault.cryptomator，也无 masterkey.cryptomator，且无 d 目录），
+        // 且用户提供了合法密码，自动补齐标准 Cryptomator Format 8 初始化
+        if !hasConfig && !hasMasterkey {
+            let dDirPath = "\(resolvedVaultPath)/d"
+            let hasDDir = (try? await storageClient.exists(path: dDirPath)) ?? false
+            if !hasDDir {
+                // 检查目录内是否存在其他非隐藏数据文件，若为空或目录尚不存在，执行安全自愈初始化
+                let existingItems = (try? await storageClient.listDirectory(path: resolvedVaultPath)) ?? []
+                let hasMeaningfulData = existingItems.contains { !$0.displayName.hasPrefix(".") }
+                if !hasMeaningfulData {
+                    logInfo(.system, "🛠️ [VFS] Remote vault is uninitialized or aborted in previous run. Performing auto-healing initialization with provided password...")
+                    let vaultName = (resolvedVaultPath as NSString).lastPathComponent.isEmpty ? "Vault" : (resolvedVaultPath as NSString).lastPathComponent
+                    do {
+                        _ = try await self.initializeVault(name: vaultName, password: password, storagePath: resolvedVaultPath, vaultId: vaultId)
+                        hasConfig = (try? await storageClient.exists(path: configPath)) ?? false
+                        hasMasterkey = (try? await storageClient.exists(path: masterkeyPath)) ?? false
+                        logSuccess(.system, "🎉 [VFS] Auto-healing initialization succeeded! configExists: \(hasConfig), masterkeyExists: \(hasMasterkey)")
+                    } catch {
+                        logError(.system, "❌ [VFS] Auto-healing initialization failed: \(error)")
+                    }
+                }
+            }
+        }
         
         // 模式 1: 标准 Cryptomator Format 8 (具有 vault.cryptomator JWT 配置)
         if hasConfig {
@@ -60,7 +136,7 @@ extension VirtualFileSystem {
             var mkPath = masterkeyPath
             if jwtConfig.header.kid.hasPrefix("masterkeyfile:") {
                 let mkFile = String(jwtConfig.header.kid.dropFirst(14))
-                mkPath = "\(cleanVaultPath)/\(mkFile)"
+                mkPath = "\(resolvedVaultPath)/\(mkFile)"
             }
             
             let tempMKURL = tempDir.appendingPathComponent("mk_\(UUID().uuidString)")
@@ -142,7 +218,7 @@ extension VirtualFileSystem {
         if masterKey == nil {
             let hasSalt = (try? await storageClient.exists(path: saltPath)) ?? false
             guard hasSalt && hasConfig else {
-                throw VFSError.vaultNotFound(cleanVaultPath.isEmpty ? "/" : cleanVaultPath)
+                throw VFSError.vaultNotFound(resolvedVaultPath.isEmpty ? "/" : resolvedVaultPath)
             }
             
             print("📥 [VFS] Falling back to read salt and custom vault.cryptomator...")
@@ -182,6 +258,8 @@ extension VirtualFileSystem {
                             }
                         }
                         print("🎉 [VFS] Automatically upgraded and saved standard Cryptomator Format 8 configuration")
+                        // 清理升级前的遗留明文 salt 文件
+                        try? await storageClient.delete(path: saltPath)
                     }
                 }
             } catch {
@@ -194,17 +272,25 @@ extension VirtualFileSystem {
             throw VFSError.invalidPassword
         }
         
+        // 安全防护：确保远端不再残留任何暴露未加密主密钥的兼容 salt 文件
+        Task.detached { [storageClient] in
+            if (try? await storageClient.exists(path: saltPath)) == true {
+                try? await storageClient.delete(path: saltPath)
+                logInfo(.system, "🛡️ [VFS] Safely purged unencrypted legacy salt from cloud storage to prevent key leakage")
+            }
+        }
+        
         // 4. 加载或初始化本地数据库（容错设计：作为本地元数据缓存，不可因本地数据库异常阻断核心保险库挂载）
         print("💾 [VFS] Loading local database...")
         self.currentVaultId = vaultId
         self.database = VFSDatabase(vaultId: vaultId)
         do {
-            try database.load(vaultId: vaultId, basePath: cleanVaultPath)
+            try database.load(vaultId: vaultId, basePath: resolvedVaultPath)
             print("✅ [VFS] Database loaded successfully")
         } catch {
             print("ℹ️ [VFS] Database verification failed, initializing local database...")
             do {
-                try database.initialize(vaultId: vaultId, basePath: cleanVaultPath)
+                try database.initialize(vaultId: vaultId, basePath: resolvedVaultPath)
                 print("✅ [VFS] Database initialized successfully")
             } catch {
                 print("⚠️ [VFS] Local cache database initialization failed, ignoring and continuing in cloud direct read mode: \(error)")
@@ -215,7 +301,7 @@ extension VirtualFileSystem {
         cryptomatorFormat = CryptomatorFormat(
             masterkey: finalMasterKey,
             storageClient: storageClient,
-            basePath: cleanVaultPath,
+            basePath: resolvedVaultPath,
             scheme: detectedScheme,
             shorteningThreshold: shorteningThreshold
         )

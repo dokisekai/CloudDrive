@@ -49,10 +49,17 @@ for DD in $DERIVED_DATA_DIRS; do
     fi
 done
 
-# 4. 编译项目 (Debug 配置)
-echo "🔨 正在编译 CloudDrive..."
+# 4. 编译项目 (Debug 或指定配置，支持 --universal)
+ARCH_OPTS=""
+if [ "$1" == "--universal" ] || [ "$UNIVERSAL" == "1" ]; then
+    echo "🔨 正在编译 CloudDrive (Universal 通用二进制 arm64 + x86_64)..."
+    ARCH_OPTS="ARCHS=arm64 x86_64 ONLY_ACTIVE_ARCH=NO"
+else
+    echo "🔨 正在编译 CloudDrive (本机原生架构)..."
+fi
+
 BUILD_LOG=$(mktemp /tmp/clouddrive_build.XXXXXX.log)
-if ! "$XCODEBUILD" -scheme CloudDrive -configuration Debug build CODE_SIGNING_ALLOWED=NO > "$BUILD_LOG" 2>&1; then
+if ! "$XCODEBUILD" -scheme CloudDrive -configuration Debug clean build CODE_SIGNING_ALLOWED=NO $ARCH_OPTS > "$BUILD_LOG" 2>&1; then
     echo "❌ 编译失败，日志最后 20 行："
     tail -n 20 "$BUILD_LOG"
     rm -f "$BUILD_LOG"
@@ -64,8 +71,8 @@ echo "✅ 编译成功！"
 # 5. 定位构建产物
 BUILD_PRODUCTS_DIR=$("$XCODEBUILD" -scheme CloudDrive -configuration Debug -showBuildSettings 2>/dev/null | grep -m 1 "TARGET_BUILD_DIR =" | awk '{print $3}')
 if [ -z "$BUILD_PRODUCTS_DIR" ] || [ ! -d "$BUILD_PRODUCTS_DIR/CloudDrive.app" ]; then
-    # 回退到 DerivedData 查找
-    BUILD_PRODUCTS_DIR=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "CloudDrive.app" -type d -path "*/Build/Products/Debug/*" 2>/dev/null | head -n 1 | xargs dirname)
+    # 回退到 DerivedData 查找 (严格排除 Index.noindex 索引临时目录)
+    BUILD_PRODUCTS_DIR=$(find "$HOME/Library/Developer/Xcode/DerivedData" -name "CloudDrive.app" -type d -path "*/Build/Products/Debug/*" ! -path "*/Index.noindex/*" 2>/dev/null | head -n 1 | xargs dirname)
 fi
 
 APP_PATH="$BUILD_PRODUCTS_DIR/CloudDrive.app"
@@ -74,6 +81,12 @@ EXT_PATH="$APP_PATH/Contents/PlugIns/CloudDriveFileProvider.appex"
 if [ ! -d "$APP_PATH" ]; then
     echo "❌ 未找到构建好的 CloudDrive.app"
     exit 1
+fi
+
+# 确保 Extension 具备独立 AppIcon.icns 资源，供访达侧边栏与系统服务加载专属图标
+mkdir -p "$EXT_PATH/Contents/Resources"
+if [ -f "$APP_PATH/Contents/Resources/AppIcon.icns" ]; then
+    cp "$APP_PATH/Contents/Resources/AppIcon.icns" "$EXT_PATH/Contents/Resources/"
 fi
 
 # 6. 选择最佳代码签名身份
@@ -90,12 +103,15 @@ fi
 
 # 7. 从内到外严格执行签名 (包含 Entitlements 与 Frameworks)
 echo "✍️ 正在对组件进行代码签名..."
-# 7.1 签名 Frameworks
+# 7.1 签名 dylibs 与 Frameworks
+find "$APP_PATH/Contents/MacOS" -name "*.dylib" -exec codesign --force --sign "$SIGN_IDENTITY" {} \; 2>/dev/null || true
 if [ -d "$APP_PATH/Contents/Frameworks" ]; then
-    find "$APP_PATH/Contents/Frameworks" -name "*.framework" -exec codesign --force --sign "$SIGN_IDENTITY" {} \;
+    find "$APP_PATH/Contents/Frameworks" -name "*.dylib" -exec codesign --force --sign "$SIGN_IDENTITY" {} \; 2>/dev/null || true
+    find "$APP_PATH/Contents/Frameworks" -name "*.framework" -exec codesign --force --sign "$SIGN_IDENTITY" {} \; 2>/dev/null || true
 fi
 if [ -d "$EXT_PATH/Contents/Frameworks" ]; then
-    find "$EXT_PATH/Contents/Frameworks" -name "*.framework" -exec codesign --force --sign "$SIGN_IDENTITY" {} \;
+    find "$EXT_PATH/Contents/Frameworks" -name "*.dylib" -exec codesign --force --sign "$SIGN_IDENTITY" {} \; 2>/dev/null || true
+    find "$EXT_PATH/Contents/Frameworks" -name "*.framework" -exec codesign --force --sign "$SIGN_IDENTITY" {} \; 2>/dev/null || true
 fi
 
 # 7.2 签名 Extension (必须嵌入 App Group 和 Sandbox)
@@ -119,15 +135,25 @@ cp -R "$APP_PATH" /Applications/
 echo "🔄 注册 App 与 FileProvider Extension..."
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/CloudDrive.app
 pluginkit -a /Applications/CloudDrive.app/Contents/PlugIns/CloudDriveFileProvider.appex
+pluginkit -e use -i net.aabg.CloudDrive.CloudDriveFileProvider 2>/dev/null || true
 
 # 10. 重启系统服务
 echo "🔄 重启 fileproviderd 和 Finder..."
 killall -9 fileproviderd 2>/dev/null || true
 killall Finder 2>/dev/null || true
 
-# 11. 启动 CloudDrive
+# 11. 启动 CloudDrive 并前台展示窗口
 echo "🎉 正在启动 CloudDrive..."
+sleep 1
 open -a /Applications/CloudDrive.app
+sleep 1
+osascript -e '
+tell application "CloudDrive" to activate
+tell application "System Events"
+    tell process "CloudDrive"
+        set frontmost to true
+    end tell
+end tell' 2>/dev/null || true
 
 echo "=================================================="
 echo "✨ 安装完成！CloudDrive 虚拟盘将自动加载到访达侧边栏。"

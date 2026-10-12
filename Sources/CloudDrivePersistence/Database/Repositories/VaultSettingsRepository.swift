@@ -5,7 +5,7 @@
 //  Copyright (c) 2026 李彦军 liyanjun@aabg.net
 //  https://github.com/dokisekai/CloudDrive
 //
-//  加密库专属设置仓储（存储于库本地 vfs.db 中，管理该库的回收站、忽略规则等配置）
+//  加密库专属设置仓储（存储于库本地 vfs.db 中，管理该库的忽略规则等配置）
 //
 
 import Foundation
@@ -83,21 +83,6 @@ public final class VaultSettingsRepository: Sendable {
             results[key] = val
         }
         return results
-    }
-    
-    // MARK: - 常用专属业务配置项
-    
-    /// 获取当前加密库是否开启回收站（默认关闭 false）
-    public func isRecycleBinEnabled() throws -> Bool {
-        guard let val = try get(key: "recycle_bin_enabled") else {
-            return false // 默认关闭
-        }
-        return val == "true" || val == "1"
-    }
-    
-    /// 设置当前加密库是否开启回收站
-    public func setRecycleBinEnabled(_ enabled: Bool) throws {
-        try set(key: "recycle_bin_enabled", value: enabled ? "true" : "false")
     }
     
     /// 获取当前加密库持久化的忽略规则内容

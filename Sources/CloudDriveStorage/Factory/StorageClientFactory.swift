@@ -22,26 +22,12 @@ public class StorageClientFactory {
         case .webdav(let config):
             return WebDAVStorageClient(config: config)
             
-        case .s3(let config):
-            return S3StorageClient(config: config)
+        case .baidupan(let config):
+            return BaiduPanStorageClient(config: config)
             
-        case .smb(let config):
-            return SMBStorageClient(config: config)
-            
-        case .ftp(let config):
-            return FTPStorageClient(config: config)
-            
-        case .pan123(let config):
-            return Pan123StorageClient(config: config)
-            
-        case .local(let config):
-            let client = LocalStorageClient()
-            if let bookmark = config.bookmarkData {
-                client.configureSecurityScope(bookmarkData: bookmark)
-            } else if !config.path.isEmpty {
-                client.configureSecurityScope(url: URL(fileURLWithPath: config.path))
-            }
-            return client
+        case .s3, .smb, .ftp, .pan123, .local:
+            return DisabledStorageClient(type: configuration.type)
+
         }
     }
     
@@ -50,6 +36,7 @@ public class StorageClientFactory {
         for vault: VaultInfo,
         fallbackPassword: String? = nil
     ) -> StorageClient {
+        guard vault.isStorageEnabled else { return DisabledStorageClient(type: vault.storageType) }
         // 1. 如果包含多协议存储配置，注入有效凭据（防止脱敏存储导致密码丢失）
         if let config = vault.storageConfig {
             let effectiveConfig: StorageConfiguration
@@ -57,6 +44,9 @@ public class StorageClientFactory {
                 effectiveConfig = config.replacingSecret(pass)
             } else {
                 effectiveConfig = config
+            }
+            if case .baidupan(let panConfig) = effectiveConfig {
+                return BaiduPanStorageClient(config: panConfig, vaultID: vault.id)
             }
             return createClient(configuration: effectiveConfig)
         }
@@ -90,6 +80,9 @@ public class StorageClientFactory {
     
     /// 测试指定协议配置的连接有效性
     public static func testConnection(configuration: StorageConfiguration) async throws -> Bool {
+        guard configuration.type.isAvailable else {
+            throw StorageError.notSupported("Storage type \(configuration.type.displayName) is not enabled")
+        }
         let client = createClient(configuration: configuration)
         return try await client.testConnection()
     }

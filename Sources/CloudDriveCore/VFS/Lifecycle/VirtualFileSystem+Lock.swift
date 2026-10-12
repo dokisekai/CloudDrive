@@ -1,15 +1,22 @@
 import Foundation
 import CryptomatorCryptoLib
+import CloudDriveSystem
 
 extension VirtualFileSystem {
     public func lock() {
         print("🔒 [VFS] Locking vault...")
+        
+        let lockingVaultId = currentVaultId
         
         // 从密钥链删除主密钥
         if let vaultId = currentVaultId {
             try? CredentialStore.shared.deleteMasterKey(forVault: vaultId)
             currentVaultId = nil
         }
+        
+        // 清理活跃原生进度，防止 Finder 出现残留悬挂圆环
+        FileProgressPublisher.shared.cancelTransfers(for: lockingVaultId)
+        FolderProgressAggregator.shared.unpublishAll(under: nil)
         
         // 清除内存中的主密钥
         encryption.clearMasterKey()

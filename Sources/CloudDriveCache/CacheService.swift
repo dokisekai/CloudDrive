@@ -24,6 +24,7 @@ public final class CacheService: @unchecked Sendable {
     public let reconciler: CacheReconciler
     public let notifier: CacheNotificationService
     public let vaultId: String?
+    let contentIndex: CacheContentIndex
     let accessLock = NSLock()
     var activeAccesses: [String: Int] = [:]
     var accessDescriptors: [String: Int32] = [:]
@@ -61,6 +62,7 @@ public final class CacheService: @unchecked Sendable {
         maximumCacheSize: Int64? = nil
     ) {
         self.storage = storage
+        self.contentIndex = CacheContentIndex(url: storage.cacheDirectory.deletingLastPathComponent().appendingPathComponent("content-index.db"))
         self.metadataStore = metadataStore
         self.policyEngine = policyEngine
         self.notifier = notifier

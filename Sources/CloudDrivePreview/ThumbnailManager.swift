@@ -20,8 +20,8 @@ public final class ThumbnailManager {
     /// 缩略图缓存最大容量（默认 500 MB）
     public static let maxThumbnailCacheSize: Int64 = 500 * 1024 * 1024
     
-    /// 未下载文件自动生成缩略图的最大文件大小（默认 30 MB，防止大视频被全量拉取）
-    public static let maxAutoDownloadSizeForThumbnail: Int64 = 30 * 1024 * 1024
+    /// 未下载文件自动生成缩略图的最大文件大小（降至 1 MB，防止画廊/大图标视图批量浏览时隐式全量拉取偷跑流量）
+    public static let maxAutoDownloadSizeForThumbnail: Int64 = 1 * 1024 * 1024
     
     private let cacheDir = CloudDrivePaths.thumbnailsDirectory
     private let queue = DispatchQueue(label: "com.clouddrive.thumbnails.queue", attributes: .concurrent)

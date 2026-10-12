@@ -10,6 +10,7 @@ public enum StorageError: Error, LocalizedError, Sendable {
     case networkError(String)
     case serverError(statusCode: Int, message: String)
     case notSupported(String)
+    case indeterminateMutation(String)
     
     public var errorDescription: String? {
         switch self {
@@ -31,6 +32,8 @@ public enum StorageError: Error, LocalizedError, Sendable {
             return "服务器返回错误 (状态码 \(code)): \(msg)"
         case .notSupported(let msg):
             return "当前存储类型不支持该功能: \(msg)"
+        case .indeterminateMutation(let msg):
+            return "操作状态不确定: \(msg)"
         }
     }
     

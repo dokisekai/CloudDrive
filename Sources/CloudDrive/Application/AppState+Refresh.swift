@@ -60,6 +60,34 @@ extension AppState {
                         self.vaults[i].isMounted = isRegistered
                         changed = true
                     }
+                    if isRegistered {
+                        let vault = self.vaults[i]
+                        Task {
+                            do {
+                                try await self.registerFileProviderDomain(for: vault)
+                                var unlockUserInfo: [AnyHashable: Any] = ["vaultId": vault.id]
+                                if let tokenStr = self.getBaiduTokenPayloadString(for: vault.id) {
+                                    unlockUserInfo["baiduToken"] = tokenStr
+                                }
+                                if let vp = self.getVaultPassword(for: vault.id) {
+                                    unlockUserInfo["vaultPassword"] = vp
+                                }
+                                if let sp = self.getWebDAVPassword(for: vault.id) {
+                                    unlockUserInfo["storagePassword"] = sp
+                                    unlockUserInfo["webdavPassword"] = sp
+                                }
+                                let center = DistributedNotificationCenter.default()
+                                center.postNotificationName(
+                                    NSNotification.Name("net.aabg.CloudDrive.vaultUnlocked"),
+                                    object: nil,
+                                    userInfo: unlockUserInfo,
+                                    deliverImmediately: true
+                                )
+                            } catch {
+                                NSLog("⚠️ [AppState] Failed to update domain userInfo for %@: %@", vault.name, error as NSError)
+                            }
+                        }
+                    }
                 }
                 if changed {
                     self.saveVaults()

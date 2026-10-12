@@ -61,7 +61,22 @@ extension FileProviderExtension {
                 // Retrieve file info from VFS
                 logInfo(.fileOps, "🔍 FileProvider: Looking up item with ID: \(identifier.rawValue)")
                 let vfsItem = try self.findItem(identifier: identifier.rawValue)
-                let item = makeItem(vfsItem: vfsItem, isEncrypted: self.vfs.isEncrypted)
+                let item: FileProviderItem
+                if vfsItem.id != identifier.rawValue {
+                    item = self.makeItem(
+                        identifier: identifier,
+                        parentIdentifier: (vfsItem.parentId == "ROOT" || vfsItem.parentId == "/") ? .rootContainer : NSFileProviderItemIdentifier(vfsItem.parentId),
+                        filename: vfsItem.name,
+                        contentType: vfsItem.isDirectory ? .folder : .data,
+                        capabilities: [.allowsReading, .allowsWriting, .allowsDeleting, .allowsTrashing, .allowsRenaming, .allowsReparenting],
+                        documentSize: vfsItem.size > 0 ? vfsItem.size : nil,
+                        contentModificationDate: vfsItem.modifiedAt,
+                        creationDate: vfsItem.modifiedAt,
+                        isEncrypted: self.vfs.isEncrypted
+                    )
+                } else {
+                    item = makeItem(vfsItem: vfsItem, isEncrypted: self.vfs.isEncrypted)
+                }
                 logSuccess(.fileOps, "✅ FileProvider: Found item: \(item.filename)")
                 completionHandler(item, nil)
                 progress.completedUnitCount = 1

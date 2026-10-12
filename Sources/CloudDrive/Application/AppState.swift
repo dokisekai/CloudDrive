@@ -10,6 +10,7 @@
 
 import SwiftUI
 import CloudDriveCore
+import CloudDriveSystem
 import FileProvider
 import Network
 import AppKit
@@ -39,13 +40,71 @@ class AppState: ObservableObject {
     init() {
         NSLog("🚀 AppState: Initializing...")
         loadVaults()
+        BaiduPanTokenStore().broadcastExistingTokens()
         refreshMountedDomains()
         startAutoRefreshEngine()
         setupAutoLockEngine()
-        Task.detached(priority: .background) {
-            await RecycleBinManager.shared.purgeExpiredItems()
+        NotificationCenter.default.addObserver(
+            forName: .vaultDidLock,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshMountedDomains()
+            }
         }
+        DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("net.aabg.CloudDrive.requestUnlock"),
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let vaultId = note.userInfo?["vaultId"] as? String
+            Task { @MainActor [weak self] in
+                self?.handleRequestUnlock(vaultId: vaultId)
+            }
+        }
+
+        autoMountEligibleVaults()
         NSLog("✅ AppState: Initialization complete")
+    }
+    
+    // MARK: - 自动挂载所有符合条件的存储库（开机 / 启动 / 守护重启）
+    public func autoMountEligibleVaults() {
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            guard AppSettings.shared.autoMountOnLaunch else {
+                NSLog("ℹ️ AppState: Auto-mount on launch is disabled in AppSettings")
+                return
+            }
+            for vault in self.vaults {
+                if vault.isAutoMount && vault.isStorageEnabled {
+                    if vault.isMounted && (!vault.isEncrypted || vault.isUnlocked) {
+                        try? await self.registerFileProviderDomain(for: vault)
+                        continue
+                    }
+                    NSLog("📂 AppState: Auto-mounting eligible vault: \(vault.name)")
+                    do {
+                        try await self.remountVault(vault)
+                        NSLog("✅ AppState: Auto-mounted vault successfully: \(vault.name)")
+                    } catch {
+                        NSLog("⚠️ AppState: Auto-mount failed for vault \(vault.name): \(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - 响应 Finder 侧边栏访问受保护库的解锁请求
+    func handleRequestUnlock(vaultId: String?) {
+        guard let vaultId = vaultId,
+              let vault = vaults.first(where: { $0.id == vaultId }),
+              vault.isEncrypted,
+              !vault.isUnlocked else { return }
+        
+        NSLog("🔓 AppState: Received requestUnlock notification for vault: \(vault.name)")
+        self.selectedVaultForUnlock = vault
+        self.showUnlockVault = true
+        NSApp.activate(ignoringOtherApps: true)
     }
     
     // MARK: - 自动锁定引擎 (依据 AppSettings.shared.autoLock & autoLockTimeout)

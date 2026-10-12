@@ -13,6 +13,7 @@ import CloudDriveContracts
 
 /// 缓存元数据仓储协议
 public protocol CacheMetadataStoreProtocol: AnyObject, Sendable {
+    var isHealthy: Bool { get }
     func get(for fileId: String) -> CacheMetadata?
     func set(_ metadata: CacheMetadata)
     func remove(for fileId: String) -> CacheMetadata?
@@ -23,6 +24,8 @@ public protocol CacheMetadataStoreProtocol: AnyObject, Sendable {
     func getAllKeys() -> [String]
     func getAllPinnedFileIds() -> [String]
     func getStatistics() -> (totalSize: Int64, fileCount: Int)
+    func getDynamicStatistics() -> (totalSize: Int64, fileCount: Int)
+    func getPinnedStatistics() -> (totalSize: Int64, fileCount: Int)
     func clearAll()
     func save(immediate: Bool)
     func reloadIfNeeded()
@@ -30,6 +33,17 @@ public protocol CacheMetadataStoreProtocol: AnyObject, Sendable {
 }
 
 public extension CacheMetadataStoreProtocol {
+    var isHealthy: Bool { true }
+    func getDynamicStatistics() -> (totalSize: Int64, fileCount: Int) {
+        let metas = getAllMetadata().values.filter { $0.policy != .pinned }
+        return (metas.reduce(0) { $0 + $1.size }, metas.count)
+    }
+
+    func getPinnedStatistics() -> (totalSize: Int64, fileCount: Int) {
+        let metas = getAllMetadata().values.filter { $0.policy == .pinned }
+        return (metas.reduce(0) { $0 + $1.size }, metas.count)
+    }
+
     func getEvictionCandidates(limit: Int = 100) -> [CacheMetadata] {
         getAllMetadata().values
             .filter { $0.policy != .pinned }

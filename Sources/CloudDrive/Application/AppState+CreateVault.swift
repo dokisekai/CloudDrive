@@ -18,7 +18,6 @@ extension AppState {
         // 配置 SyncManager
         print("✅ AppState: Storage configured")
         
-        // 初始化保险库（无加密）
         let vaultId = try await vfs.initializeVaultWithoutEncryption(name: name, storagePath: "/")
         
         // 保存保险库信息
@@ -57,7 +56,7 @@ extension AppState {
         print("✅ AppState: Storage configured")
         
         // 初始化加密保险库
-        let storagePath = "/"
+        let storagePath = "/" + name
         let vaultId = try await vfs.initializeVault(name: name, password: vaultPassword, storagePath: storagePath, vaultId: UUID().uuidString)
         print("🆔 AppState: Encrypted vault initialized successfully, ID: \(vaultId)")
         
@@ -71,7 +70,7 @@ extension AppState {
         let vaultInfo = VaultInfo(
             id: vaultId,
             name: name,
-            storagePath: "/" + name,
+            storagePath: storagePath,
             createdAt: Date(),
             webdavURL: webdavURL,
             webdavUsername: username,

@@ -15,16 +15,20 @@ extension VirtualFileSystem {
         }
         print("✅ [VFS] storageClient configured")
         
-        // 1. 生成主密钥和盐
-        print("🔑 [VFS] Generating master key and salt...")
-        let (masterKey, salt) = try encryption.generateMasterKey(password: password)
+        // 1. 生成主密钥
+        print("🔑 [VFS] Generating master key...")
+        let (masterKey, _) = try encryption.generateMasterKey(password: password)
         print("✅ [VFS] Master key generated successfully")
-        print("🧂 [VFS] Salt generated successfully (length: \(salt.count) bytes)")
         
         // 2. 创建加密的保险库结构
         let vaultId = requestedVaultId ?? name
         let cleanStoragePath = storagePath == "/" ? "" : storagePath
-        let vaultPath = "\(cleanStoragePath)/\(name)"
+        let vaultPath: String
+        if cleanStoragePath.hasSuffix("/\(name)") || cleanStoragePath == name || cleanStoragePath == "/\(name)" {
+            vaultPath = cleanStoragePath.hasPrefix("/") ? cleanStoragePath : "/\(cleanStoragePath)"
+        } else {
+            vaultPath = "\(cleanStoragePath)/\(name)"
+        }
         print("📁 [VFS] Vault path: \(vaultPath)")
         
         let configPath = "\(vaultPath)/vault.cryptomator"
@@ -93,14 +97,7 @@ extension VirtualFileSystem {
             defer { try? FileManager.default.removeItem(at: tempMasterkeyURL) }
             try await storageClient.uploadFile(localURL: tempMasterkeyURL, to: masterkeyPath, mode: .createIfAbsent) { _ in }
             print("✅ [VFS] Standard masterkey.cryptomator written successfully")
-            
-            // 3. 同时保存向后兼容的 salt 文件
-            let tempSaltURL = tempDir.appendingPathComponent("salt_\(UUID().uuidString)")
-            try salt.write(to: tempSaltURL, options: [.atomic])
-            defer { try? FileManager.default.removeItem(at: tempSaltURL) }
-            try await storageClient.uploadFile(localURL: tempSaltURL, to: saltPath, mode: .createIfAbsent) { _ in }
-            print("✅ [VFS] Compatibility salt file written successfully")
-            
+            // Standard Format 8 does not store unencrypted raw masterkey on remote storage.
         } catch let vfsError as VFSError {
             throw vfsError
         } catch StorageError.serverError(let code, _) where code == 412 {

@@ -100,6 +100,15 @@ struct CreateVaultView: View {
     @State private var pan123RootFolderID: Int64 = 0
     @State private var pan123RootPath = "/"
     
+    // 百度网盘配置
+    @State private var baiduAppID = ""
+    @State private var baiduAppKey = ""
+    @State private var baiduClientSecret = ""
+    @State private var baiduAppFolderName = "CloudDrive"
+    @State private var baiduRootPath = "/"
+    @State private var baiduRefreshToken = ""
+    @State private var baiduAccessToken = ""
+    
     // Local 本地存储配置
     @State private var localPath = ""
     @State private var localBookmarkData: Data? = nil
@@ -238,6 +247,17 @@ struct CreateVaultView: View {
                         WebDAVFormView(url: $webdavURL, username: $webdavUsername, password: $webdavPassword, isConnecting: isConnecting)
                     case .s3:
                         S3FormView(preset: $s3Preset, endpoint: $s3Endpoint, region: $s3Region, bucket: $s3Bucket, accessKey: $s3AccessKey, secretKey: $s3SecretKey, rootPrefix: $s3RootPrefix, usePathStyle: $s3UsePathStyle, isConnecting: isConnecting)
+                    case .baidupan:
+                        BaiduPanFormView(
+                            appID: $baiduAppID,
+                            appKey: $baiduAppKey,
+                            clientSecret: $baiduClientSecret,
+                            appFolderName: $baiduAppFolderName,
+                            rootPath: $baiduRootPath,
+                            refreshToken: $baiduRefreshToken,
+                            accessToken: $baiduAccessToken,
+                            isConnecting: isConnecting
+                        )
                     case .smb:
                         SMBFormView(host: $smbHost, port: $smbPort, share: $smbShare, path: $smbPath, username: $smbUsername, password: $smbPassword, domain: $smbDomain, isConnecting: isConnecting)
                     case .ftp:
@@ -544,6 +564,7 @@ struct CreateVaultView: View {
         switch selectedProtocol {
         case .webdav: return L("protocol_webdav_title")
         case .s3: return L("protocol_s3_title")
+        case .baidupan: return L("protocol_baidupan_title")
         case .smb: return L("protocol_smb_title")
         case .ftp: return L("protocol_ftp_title")
         case .pan123: return L("protocol_pan123_title")
@@ -587,6 +608,10 @@ struct CreateVaultView: View {
             return !webdavURL.isEmpty && !webdavUsername.isEmpty && !webdavPassword.isEmpty
         case .s3:
             return !s3Endpoint.isEmpty && !s3Bucket.isEmpty && !s3AccessKey.isEmpty && !s3SecretKey.isEmpty
+        case .baidupan:
+            return !baiduAppKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                   !baiduClientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                   !baiduRefreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         case .smb:
             return !smbHost.isEmpty && !smbShare.isEmpty
         case .ftp:
@@ -656,6 +681,17 @@ struct CreateVaultView: View {
                 usePathStyle: s3UsePathStyle,
                 rootPrefix: s3RootPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
             ))
+        case .baidupan:
+            return .baidupan(BaiduPanStorageConfig(
+                appID: baiduAppID.trimmingCharacters(in: .whitespacesAndNewlines),
+                appKey: baiduAppKey.trimmingCharacters(in: .whitespacesAndNewlines),
+                clientSecret: baiduClientSecret.trimmingCharacters(in: .whitespacesAndNewlines),
+                appFolderName: baiduAppFolderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "CloudDrive" : baiduAppFolderName.trimmingCharacters(in: .whitespacesAndNewlines),
+                rootPath: baiduRootPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "/" : baiduRootPath.trimmingCharacters(in: .whitespacesAndNewlines),
+                refreshToken: baiduRefreshToken.trimmingCharacters(in: .whitespacesAndNewlines),
+                accessToken: baiduAccessToken.trimmingCharacters(in: .whitespacesAndNewlines),
+                expiresAt: Date().addingTimeInterval(25 * 86400)
+            ))
         case .smb:
             return .smb(SMBStorageConfig(
                 host: smbHost.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -712,7 +748,7 @@ struct CreateVaultView: View {
                 await MainActor.run {
                     testSuccess = false
                     let desc = error.localizedDescription
-                    testMessage = L("test_conn_failed")
+                    testMessage = "\(L("test_conn_failed")): \(desc)"
                     errorMessage = desc
                     isTesting = false
                 }

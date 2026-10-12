@@ -26,6 +26,9 @@ enum WebDAVRetryPolicy {
             if let httpResponse = result.1 as? HTTPURLResponse {
                 let statusCode = httpResponse.statusCode
                 if [429, 500, 502, 503, 504].contains(statusCode) && retries < maxRetries {
+                    if let temporaryURL = result.0 as? URL, temporaryURL.isFileURL {
+                        try? FileManager.default.removeItem(at: temporaryURL)
+                    }
                     print("⚠️ WebDAV: Server returned status \(statusCode), retrying \(retries + 1)/\(maxRetries)...")
                     try await Task.sleep(nanoseconds: backoff)
                     retries += 1

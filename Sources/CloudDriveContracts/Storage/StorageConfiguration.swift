@@ -7,6 +7,7 @@ public enum StorageConfiguration: Codable, Hashable, Sendable {
     case ftp(FTPStorageConfig)
     case pan123(Pan123StorageConfig)
     case local(LocalStorageConfig)
+    case baidupan(BaiduPanStorageConfig)
     
     public var type: StorageType {
         switch self {
@@ -16,6 +17,7 @@ public enum StorageConfiguration: Codable, Hashable, Sendable {
         case .ftp: return .ftp
         case .pan123: return .pan123
         case .local: return .local
+        case .baidupan: return .baidupan
         }
     }
     
@@ -34,6 +36,8 @@ public enum StorageConfiguration: Codable, Hashable, Sendable {
             return "123云盘 (\(rootDesc))"
         case .local(let cfg):
             return "本地 (\(cfg.path))"
+        case .baidupan(let cfg):
+            return "百度网盘 (/apps/\(cfg.appFolderName))"
         }
     }
     
@@ -45,6 +49,7 @@ public enum StorageConfiguration: Codable, Hashable, Sendable {
         case .ftp(let cfg): return URL(string: "\(cfg.scheme)://\(cfg.host):\(cfg.port)")
         case .pan123: return URL(string: "https://open-api.123pan.com")
         case .local(let cfg): return URL(fileURLWithPath: cfg.path)
+        case .baidupan: return URL(string: "https://pan.baidu.com")
         }
     }
     
@@ -56,6 +61,7 @@ public enum StorageConfiguration: Codable, Hashable, Sendable {
         case .ftp(let cfg): return cfg.username
         case .pan123(let cfg): return cfg.clientID.isEmpty ? nil : cfg.clientID
         case .local: return nil
+        case .baidupan(let cfg): return cfg.appKey.isEmpty ? nil : cfg.appKey
         }
     }
 }
@@ -72,6 +78,10 @@ extension StorageConfiguration {
             if let token = c.accessToken, !token.isEmpty { return token }
             return ""
         case .local: return nil
+        case .baidupan(let c):
+            if !c.clientSecret.isEmpty { return c.clientSecret }
+            if !c.refreshToken.isEmpty { return c.refreshToken }
+            return ""
         }
     }
 
@@ -92,6 +102,9 @@ extension StorageConfiguration {
             }
             return .pan123(c)
         case .local: return self
+        case .baidupan(var c):
+            c.clientSecret = secret
+            return .baidupan(c)
         }
     }
 

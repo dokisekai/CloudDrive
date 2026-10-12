@@ -31,6 +31,9 @@ public struct VaultInfo: Identifiable, Codable, Hashable, Sendable {
     // 是否为加密保险库
     public var isEncrypted: Bool = false
     
+    // 解锁状态（不持久化，运行时状态；非加密库默认为 true，加密库默认为 false）
+    public var isUnlocked: Bool = false
+    
     // 本地文件夹安全书签（用于沙箱跨进程访问）
     public var bookmarkData: Data? = nil
     
@@ -49,6 +52,7 @@ public struct VaultInfo: Identifiable, Codable, Hashable, Sendable {
         webdavUsername: String? = nil,
         isMounted: Bool = false,
         isEncrypted: Bool = false,
+        isUnlocked: Bool? = nil,
         bookmarkData: Data? = nil,
         isAutoMount: Bool = true
     ) {
@@ -62,10 +66,49 @@ public struct VaultInfo: Identifiable, Codable, Hashable, Sendable {
         self.webdavUsername = webdavUsername
         self.isMounted = isMounted
         self.isEncrypted = isEncrypted
+        self.isUnlocked = isUnlocked ?? (!isEncrypted)
         self.bookmarkData = bookmarkData
         self.isAutoMount = isAutoMount
     }
     
+    // 向后兼容 12 参数初始化器
+    public init(
+        id: String,
+        name: String,
+        storagePath: String,
+        createdAt: Date,
+        storageType: StorageType = .webdav,
+        storageConfig: StorageConfiguration? = nil,
+        webdavURL: String? = nil,
+        webdavUsername: String? = nil,
+        isMounted: Bool = false,
+        isEncrypted: Bool = false,
+        bookmarkData: Data? = nil,
+        isAutoMount: Bool = true
+    ) {
+        self.init(
+            id: id,
+            name: name,
+            storagePath: storagePath,
+            createdAt: createdAt,
+            storageType: storageType,
+            storageConfig: storageConfig,
+            webdavURL: webdavURL,
+            webdavUsername: webdavUsername,
+            isMounted: isMounted,
+            isEncrypted: isEncrypted,
+            isUnlocked: !isEncrypted,
+            bookmarkData: bookmarkData,
+            isAutoMount: isAutoMount
+        )
+    }
+    
+    /// 是否可由当前 WebDAV-only 版本挂载。旧配置保留但不启动其后端。
+    public var isStorageEnabled: Bool {
+        if let config = storageConfig { return config.type.isAvailable }
+        return storageType == .webdav && !isLocal && webdavUsername != nil
+    }
+
     /// 是否为本地保险库（非云端 WebDAV/S3/SMB/FTP）
     public var isLocal: Bool {
         if storageType == .local { return true }
@@ -73,7 +116,7 @@ public struct VaultInfo: Identifiable, Codable, Hashable, Sendable {
         return (webdavURL == nil || webdavURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true) && storageConfig == nil
     }
     
-    // 自定义 Codable 实现，排除 isMounted
+    // 自定义 Codable 实现，排除 isMounted 与 isUnlocked
     enum CodingKeys: String, CodingKey {
         case id, name, storagePath, createdAt, storageType, storageConfig, webdavURL, webdavUsername, isEncrypted, bookmarkData, isAutoMount
     }
@@ -90,6 +133,7 @@ public struct VaultInfo: Identifiable, Codable, Hashable, Sendable {
         bookmarkData = try? container.decodeIfPresent(Data.self, forKey: .bookmarkData)
         isAutoMount = (try? container.decodeIfPresent(Bool.self, forKey: .isAutoMount)) ?? true
         isMounted = false  // 默认未挂载
+        isUnlocked = !isEncrypted  // 非加密库默认已解锁，加密库默认处于锁定状态
         
         let decodedType = try? container.decodeIfPresent(StorageType.self, forKey: .storageType)
         let decodedConfig = try? container.decodeIfPresent(StorageConfiguration.self, forKey: .storageConfig)

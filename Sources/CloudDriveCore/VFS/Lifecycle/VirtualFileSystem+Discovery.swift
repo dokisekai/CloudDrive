@@ -38,6 +38,22 @@ extension VirtualFileSystem {
             }
         }
         
+        // 候选 3: storagePath/<lastPathComponent>（自愈处理历史重复路径，如 /MyVault/MyVault）
+        let lastComponent = (cleanStorage as NSString).lastPathComponent
+        if !lastComponent.isEmpty && lastComponent != "/" {
+            let pathWithDuplicate = "\(basePath1)/\(lastComponent)"
+            let hasMK3 = (try? await storageClient.exists(path: "\(pathWithDuplicate)/masterkey.cryptomator")) ?? false
+            let hasSalt3 = (try? await storageClient.exists(path: "\(pathWithDuplicate)/salt")) ?? false
+            let hasConfig3 = (try? await storageClient.exists(path: "\(pathWithDuplicate)/vault.cryptomator")) ?? false
+            let hasD3 = (try? await storageClient.exists(path: "\(pathWithDuplicate)/d")) ?? false
+            
+            if hasMK3 || (hasSalt3 && hasConfig3) || hasD3 {
+                print("🔄 [VFS] Auto-healing: Found vault configuration at nested duplicate path '\(pathWithDuplicate)'")
+                logInfo(.system, "🔄 [VFS] Auto-healing: Found vault configuration at nested duplicate path '\(pathWithDuplicate)'")
+                return pathWithDuplicate
+            }
+        }
+        
         return cleanStorage
     }
 

@@ -16,6 +16,7 @@ import SQLite3
 /// SQLite 原生安全连接管理类
 public final class SQLiteConnection: @unchecked Sendable {
     private var db: OpaquePointer?
+    private var transactionFailure: Error?
     public let dbPath: URL
     private let lock = NSRecursiveLock()
     
@@ -32,6 +33,7 @@ public final class SQLiteConnection: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         
+        if let transactionFailure { throw transactionFailure }
         if let existing = db {
             return existing
         }
@@ -47,6 +49,7 @@ public final class SQLiteConnection: @unchecked Sendable {
     public var rawHandle: OpaquePointer? {
         lock.lock()
         defer { lock.unlock() }
+        guard transactionFailure == nil else { return nil }
         if let existing = db {
             return existing
         }
@@ -85,70 +88,96 @@ public final class SQLiteConnection: @unchecked Sendable {
             throw DatabaseError.connectionFailed(path: pathStr, code: result, message: errMsg)
         }
         
-        self.db = validDb
-        
-        // Configure WAL mode for concurrent readers and writers across App and extension processes.
-        var err: UnsafeMutablePointer<CChar>?
-        sqlite3_exec(validDb, "PRAGMA journal_mode = WAL;", nil, nil, &err)
-        sqlite3_free(err)
-        sqlite3_exec(validDb, "PRAGMA synchronous = NORMAL;", nil, nil, &err)
-        sqlite3_free(err)
-        sqlite3_busy_timeout(validDb, 5_000)
+        // Publish the handle only after every required setting succeeds.
+        do {
+            guard sqlite3_busy_timeout(validDb, 5_000) == SQLITE_OK else {
+                throw DatabaseError.connectionFailed(path: pathStr, code: sqlite3_errcode(validDb), message: "Cannot configure database timeout")
+            }
+            for sql in ["PRAGMA journal_mode = WAL;", "PRAGMA synchronous = NORMAL;"] {
+                var error: UnsafeMutablePointer<CChar>?
+                let code = sqlite3_exec(validDb, sql, nil, nil, &error)
+                let message = error.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(validDb))
+                sqlite3_free(error)
+                guard code == SQLITE_OK else {
+                    throw DatabaseError.stepFailed(sql: sql, code: code, message: message)
+                }
+            }
+            self.db = validDb
+        } catch {
+            sqlite3_close_v2(validDb)
+            throw error
+        }
     }
-    
+
     private var transactionDepth = 0
 
     public func close() {
         lock.lock()
         defer { lock.unlock() }
-        transactionDepth = 0
+        // A reentrant caller cannot invalidate the handle held by its transaction.
+        guard transactionDepth == 0 else { return }
         if let currentDb = db {
-            sqlite3_close(currentDb)
+            // Outstanding read statements may still exist. close_v2 keeps their
+            // handle alive until finalization instead of leaking a BUSY connection.
+            sqlite3_close_v2(currentDb)
             self.db = nil
         }
+        transactionFailure = nil
     }
-    
+
     public func execute(sql: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
         let currentDb = try getHandle()
-        
-        var statement: OpaquePointer?
-        defer { sqlite3_finalize(statement) }
-        
-        let prepareResult = sqlite3_prepare_v2(currentDb, sql, -1, &statement, nil)
-        if prepareResult != SQLITE_OK {
-            let errMsg = String(cString: sqlite3_errmsg(currentDb))
-            throw DatabaseError.prepareFailed(sql: sql, code: prepareResult, message: errMsg)
-        }
-        
-        let stepResult = sqlite3_step(statement)
-        if stepResult != SQLITE_DONE && stepResult != SQLITE_ROW {
-            let errMsg = String(cString: sqlite3_errmsg(currentDb))
-            throw DatabaseError.stepFailed(sql: sql, code: stepResult, message: errMsg)
+        var error: UnsafeMutablePointer<CChar>?
+        // Execute the complete script; silently running only its first statement
+        // previously skipped indexes and other schema initialization.
+        let code = sqlite3_exec(currentDb, sql, nil, nil, &error)
+        let message = error.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(currentDb))
+        sqlite3_free(error)
+        guard code == SQLITE_OK else {
+            throw DatabaseError.stepFailed(sql: sql, code: code, message: message)
         }
     }
-    
+
     public func withTransaction<T>(_ block: () throws -> T) throws -> T {
         lock.lock()
         defer { lock.unlock() }
-        guard let db = try? getHandle() else { throw DatabaseError.notOpened }
-        sqlite3_mutex_enter(sqlite3_db_mutex(db))
-        defer { sqlite3_mutex_leave(sqlite3_db_mutex(db)) }
-        if transactionDepth == 0 {
+        let handle = try getHandle()
+        sqlite3_mutex_enter(sqlite3_db_mutex(handle))
+        defer { sqlite3_mutex_leave(sqlite3_db_mutex(handle)) }
+        let originalDepth = transactionDepth
+        let savepoint = "clouddrive_nested_\(originalDepth)"
+        if originalDepth == 0 {
             try execute(sql: "BEGIN IMMEDIATE TRANSACTION;")
+        } else {
+            try execute(sql: "SAVEPOINT \(savepoint);")
         }
-        transactionDepth += 1
+        transactionDepth = originalDepth + 1
         do {
             let result = try block()
-            transactionDepth -= 1
-            if transactionDepth == 0 {
-                try execute(sql: "COMMIT;")
-            }
+            if let transactionFailure { throw transactionFailure }
+            // Keep ownership until COMMIT actually succeeds. A failed COMMIT
+            // leaves SQLite's transaction open and must also be rolled back.
+            if originalDepth == 0 { try execute(sql: "COMMIT;") }
+            else { try execute(sql: "RELEASE SAVEPOINT \(savepoint);") }
+            transactionDepth = originalDepth
             return result
         } catch {
-            if transactionDepth == 1 {
-                try? execute(sql: "ROLLBACK;")
+            if originalDepth == 0 {
+                // Bypass the poisoned wrapper to give the outer transaction a
+                // final opportunity to recover a failed nested savepoint.
+                let code = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
+                if sqlite3_get_autocommit(handle) != 0 { transactionFailure = nil }
+                else { transactionFailure = DatabaseError.stepFailed(sql: "ROLLBACK", code: code, message: "Transaction recovery failed; reopen the connection") }
+            } else {
+                let rollbackCode = sqlite3_exec(handle, "ROLLBACK TO SAVEPOINT \(savepoint);", nil, nil, nil)
+                let releaseCode = sqlite3_exec(handle, "RELEASE SAVEPOINT \(savepoint);", nil, nil, nil)
+                if rollbackCode != SQLITE_OK || releaseCode != SQLITE_OK {
+                    transactionFailure = DatabaseError.stepFailed(sql: "ROLLBACK TO SAVEPOINT", code: rollbackCode != SQLITE_OK ? rollbackCode : releaseCode, message: "Nested transaction recovery failed")
+                }
             }
-            transactionDepth = max(0, transactionDepth - 1)
+            transactionDepth = originalDepth
             throw error
         }
     }

@@ -29,15 +29,20 @@ extension OfflineSyncQueue {
     }
 
     public func hasPendingUpload(fileId: String) -> Bool {
-        let altId = fileId.hasPrefix("/") ? String(fileId.dropFirst()) : "/\(fileId)"
-        return getAllItems().contains { item in
-            switch item.operation {
-            case .upload(let id, _, _), .encryptedUpload(let id, _, _, _, _):
-                return id == fileId || id == altId
-            default:
-                return false
-            }
-        }
+        do {
+            try checkMigrationIfNeeded()
+            let altId = fileId.hasPrefix("/") ? String(fileId.dropFirst()) : "/\(fileId)"
+            let stmt = try SQLiteStatement(db: try conn.getHandle(), sql: """
+            SELECT 1 FROM sync_queue WHERE (file_id = ? OR file_id = ?)
+              AND (operation_json LIKE '%"upload"%' OR operation_json LIKE '%"encryptedUpload"%') LIMIT 1;
+            """)
+            stmt.bindText(fileId, at: 1)
+            stmt.bindText(altId, at: 2)
+            let code = stmt.step()
+            if code == SQLITE_ROW { return true }
+            if code == SQLITE_DONE { return false }
+            throw SyncError.operationFailed("Cannot check pending upload (SQLite \(code))")
+        } catch { log(error); return true } // Protect local bytes if the journal is unavailable.
     }
 
     public func removePendingUploads(for fileId: String) {
@@ -73,6 +78,20 @@ extension OfflineSyncQueue {
         } catch { log(error) }
     }
 
+    public func removeItemsForFile(fileId: String) {
+        do {
+            try checkMigrationIfNeeded()
+            let altId = fileId.hasPrefix("/") ? String(fileId.dropFirst()) : "/\(fileId)"
+            try conn.withTransaction {
+                let sql = "DELETE FROM sync_queue WHERE file_id = ? OR file_id = ?;"
+                let stmt = try SQLiteStatement(db: try conn.getHandle(), sql: sql)
+                stmt.bindText(fileId, at: 1)
+                stmt.bindText(altId, at: 2)
+                _ = stmt.step()
+            }
+        } catch { log(error) }
+    }
+
     public func hasPendingOperation(fileId: String) -> Bool {
         do {
             try checkMigrationIfNeeded()
@@ -81,9 +100,13 @@ extension OfflineSyncQueue {
             let stmt = try SQLiteStatement(db: try conn.getHandle(), sql: sql)
             stmt.bindText(fileId, at: 1)
             stmt.bindText(altId, at: 2)
-            return stmt.step() == SQLITE_ROW
+            let code = stmt.step()
+            if code == SQLITE_ROW { return true }
+            if code == SQLITE_DONE { return false }
+            throw SyncError.operationFailed("Cannot check pending operation (SQLite \(code))")
         } catch {
-            return false
+            log(error)
+            return true // A database failure must never authorize cache eviction.
         }
     }
 }

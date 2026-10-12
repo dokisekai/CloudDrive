@@ -12,6 +12,7 @@ import SwiftUI
 import AppKit
 import FileProvider
 import CloudDriveCore
+import CloudDriveRecovery
 
 struct VaultCardView: View {
     let vaultId: String
@@ -84,7 +85,7 @@ struct VaultCardView: View {
                                 
                                 Spacer(minLength: 4)
                                 
-                                // 挂载状态指示器
+                                // 状态指示器
                                 HStack(spacing: 5) {
                                     Circle()
                                         .fill(isMounted ? Color.green : Color.secondary.opacity(0.4))
@@ -140,15 +141,15 @@ struct VaultCardView: View {
                         // 加密保护标签
                         if vault.isEncrypted {
                             HStack(spacing: 3) {
-                                Image(systemName: "lock.fill")
+                                Image(systemName: "shield.fill")
                                     .font(.system(size: 8))
                                 Text(L("badge_secure_aes"))
                                     .font(.system(size: 10, weight: .medium))
                             }
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color.orange.opacity(0.12))
-                            .foregroundColor(.orange)
+                            .background(Color.blue.opacity(0.1))
+                            .foregroundColor(.blue)
                             .cornerRadius(4)
                         } else {
                             HStack(spacing: 3) {
@@ -197,6 +198,7 @@ struct VaultCardView: View {
                 // 2. 底部操作按钮栏
                 HStack(spacing: 8) {
                     if isMounted {
+                        // 已挂载状态：【在访达中打开】 + 【卸载】
                         Button {
                             openInFinder(vault: vault)
                         } label: {
@@ -223,6 +225,7 @@ struct VaultCardView: View {
                         .buttonStyle(.bordered)
                         .controlSize(.regular)
                     } else {
+                        // 未挂载状态：【挂载】 + 【删除】
                         Button {
                             doMount(vault)
                         } label: {
@@ -299,6 +302,12 @@ struct VaultCardView: View {
                         } label: {
                             Label(L("vault_card_copy_path_tooltip"), systemImage: "doc.on.doc")
                         }
+                        
+                        Divider()
+                        
+                        Button(role: .destructive, action: onRequestDelete) {
+                            Label(L("vault_card_remove_tooltip"), systemImage: "trash")
+                        }
                     } label: {
                         Image(systemName: "ellipsis")
                             .font(.system(size: 13, weight: .medium))
@@ -368,7 +377,6 @@ struct VaultCardView: View {
                     } label: {
                         Label(L("vault_card_open_in_finder"), systemImage: "folder")
                     }
-                    
                     Button {
                         triggerUnmount(vault)
                     } label: {
@@ -415,7 +423,6 @@ struct VaultCardView: View {
                 Button(role: .destructive, action: onRequestDelete) {
                     Label(L("vault_card_remove_tooltip"), systemImage: "trash")
                 }
-                .disabled(isMounted)
             }
             .alert(L("alert_confirm_unmount"), isPresented: $showingUnmountAlert) {
                 Button(L("cancel"), role: .cancel) { }
@@ -447,6 +454,7 @@ struct VaultCardView: View {
                 let root = c.rootFolderID == 0 ? "根目录" : "ID: \(c.rootFolderID)"
                 return "123云盘 (\(root))"
             case .local(let c): return c.path
+            case .baidupan(let c): return "百度网盘 (/apps/\(c.appFolderName))"
             }
         }
         if let url = vault.webdavURL, !url.isEmpty {
@@ -456,13 +464,7 @@ struct VaultCardView: View {
     }
     
     private func iconName(for vault: VaultInfo) -> String {
-        if vault.isMounted {
-            return "externaldrive.fill.badge.checkmark"
-        }
-        if vault.isEncrypted {
-            return "lock.shield.fill"
-        }
-        return "arrow.triangle.2.circlepath"
+        return vault.isMounted ? "externaldrive.fill.badge.checkmark" : "arrow.triangle.2.circlepath"
     }
     
     private func copyPath(_ text: String) {
@@ -478,6 +480,13 @@ struct VaultCardView: View {
     }
     
     private func doMount(_ vault: VaultInfo) {
+        // 加密库若无保存密码，直接弹出输入密码窗口
+        if vault.isEncrypted && appState.getVaultPassword(for: vault.id) == nil {
+            appState.selectedVaultForUnlock = vault
+            appState.showUnlockVault = true
+            return
+        }
+        
         isMounting = true
         mountErrorMessage = nil
         

@@ -2,6 +2,40 @@ import Foundation
 
 public extension StorageClient {
     var requiresETagForUpdate: Bool { false }
+    var capabilities: StorageCapabilities { StorageCapabilities() }
+
+    func downloadRange(path: String, range: ClosedRange<Int64>) async throws -> Data {
+        try await downloadRange(path: path, range: range, expectedETag: nil)
+    }
+
+    func downloadRange(path: String, range: ClosedRange<Int64>, expectedETag: String?) async throws -> Data {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("storage_range_\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try await downloadFile(path: path, to: tempURL, progress: { _ in })
+        guard let handle = try? FileHandle(forReadingFrom: tempURL) else {
+            throw StorageError.notFound
+        }
+        defer { try? handle.close() }
+        let start = max(0, UInt64(range.lowerBound))
+        try handle.seek(toOffset: start)
+        let count = Int(max(0, range.upperBound - range.lowerBound + 1))
+        return (try handle.read(upToCount: count)) ?? Data()
+    }
+
+    @discardableResult
+    func downloadFile(path: String, to destinationURL: URL, expectedETag: String?, maximumBytes: Int64, progress: @escaping (Double) -> Void) async throws -> String? {
+        try await downloadFile(path: path, to: destinationURL, expectedETag: expectedETag, progress: progress)
+    }
+
+    func moveWithRevision(from sourcePath: String, to destinationPath: String, expectedETag: String?) async throws -> String? {
+        try await move(from: sourcePath, to: destinationPath, expectedETag: expectedETag)
+        return nil
+    }
+
+    func copy(from sourcePath: String, to destinationPath: String, expectedETag: String?) async throws -> String? {
+        try await copy(from: sourcePath, to: destinationPath)
+        return nil
+    }
 
     @discardableResult
     func uploadFile(localURL: URL, to remotePath: String, expectedETag: String?, progress: @escaping (Double) -> Void) async throws -> String? {

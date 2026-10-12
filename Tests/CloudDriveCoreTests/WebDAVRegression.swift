@@ -109,6 +109,31 @@ public func runWebDAVRegressionTests() async throws {
     do { _ = try await client.exists(path: "/a.txt") } catch { deniedExistsRejected = true }
     try verifyDAV(deniedExistsRejected, "Denied access must not be reported as absence")
 
+    for malformedMutation in ["", "<not-dav/>", "<D:multistatus xmlns:D=\"DAV:\"><D:response><D:status>HTTP/1.1 403 Forbidden</D:status></D:response></D:multistatus>"] {
+        DAVFixtureProtocol.handler = { _ in (207, [:], Data(malformedMutation.utf8)) }
+        var rejected = false
+        do { try await client.delete(path: "/a.txt", expectedETag: "\"v1\"") } catch { rejected = true }
+        try verifyDAV(rejected, "Malformed or failed DELETE multistatus must not be confirmed as success")
+    }
+
+    for maliciousHref in ["/dav/../outside", "/dav/a%2fb", "https://other.invalid/dav/a", "/outside/a", "/dav/nested/a"] {
+        let xml = "<D:multistatus xmlns:D=\"DAV:\"><D:response><D:href>\(maliciousHref)</D:href><D:propstat><D:prop><D:resourcetype/></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>"
+        DAVFixtureProtocol.handler = { _ in (207, [:], Data(xml.utf8)) }
+        var rejected = false
+        do { _ = try await client.listDirectory(path: "/") } catch { rejected = true }
+        try verifyDAV(rejected, "Listing must reject an untrusted href: \(maliciousHref)")
+    }
+    DAVFixtureProtocol.handler = { _ in throw WebDAVRegressionError.assertion("Weak ETag must be rejected before network mutation") }
+    var weakRejected = false
+    do { _ = try await client.uploadFile(localURL: upload, to: "/edit.txt", mode: .replace(expectedETag: "W/\"v1\"")) { _ in } }
+    catch let error as StorageError { weakRejected = error.isPreconditionFailure }
+    try verifyDAV(weakRejected, "A weak ETag must never be promoted to a strong If-Match validator")
+    for unsafePath in ["../outside", "a/../outside", "a\\b", "a\nheader"] {
+        var rejected = false
+        do { _ = try client.buildURL(for: unsafePath) } catch { rejected = true }
+        try verifyDAV(rejected, "Unsafe request path must be rejected")
+    }
+
     let tree = DAVMemoryStorage()
     let key = try VFSEncryption().generateMasterKey(password: "fixture only").0
     let format = CryptomatorFormat(masterkey: key, storageClient: tree, basePath: "/vault")
@@ -135,6 +160,6 @@ public func runWebDAVRegressionTests() async throws {
     try verifyDAV(corruptRejected && retainedBytes == Data("keep existing bytes".utf8), "Failed decryption must retain the previous destination")
     let childContentPath = try format.getDirPath(dirId: Data(child.id.utf8))
     try await format.deleteItem(remotePath: parent.remotePath!, dirIdData: Data(fixedId.utf8))
-    try verifyDAV(!tree.directories.contains(childContentPath) && !tree.files.keys.contains(where: { $0.hasPrefix(childContentPath + "/") }), "Deleting an encrypted directory removes flattened descendant content")
+    try verifyDAV(tree.directories.contains(childContentPath) && tree.files.keys.contains(where: { $0.hasPrefix(childContentPath + "/") }) && !tree.directories.contains(parent.remotePath!), "Deleting an encrypted directory unlinks its parent entry and preserves flattened ciphertext")
     print("  ✅ WebDAV conditional writes, complete snapshots, and encrypted replay regressions passed")
 }

@@ -9,6 +9,10 @@ extension WebDAVClient {
 
     /// Move/rename (MOVE，支持版本约束)
     public func move(from sourcePath: String, to destinationPath: String, expectedETag: String?, overwrite: Bool = false) async throws {
+        _ = try await moveWithRevision(from: sourcePath, to: destinationPath, expectedETag: expectedETag, overwrite: overwrite)
+    }
+
+    public func moveWithRevision(from sourcePath: String, to destinationPath: String, expectedETag: String?, overwrite: Bool = false) async throws -> String? {
         guard baseURL != nil else {
             throw WebDAVError.notConfigured
         }
@@ -22,23 +26,14 @@ extension WebDAVClient {
         request.setValue(overwrite ? "T" : "F", forHTTPHeaderField: "Overwrite")
         
         // Add authentication
-        if let credentials = credentials {
-            let authString = "\(credentials.user!):\(credentials.password!)"
-            if let authData = authString.data(using: .utf8) {
-                let base64Auth = authData.base64EncodedString()
-                request.setValue("Basic \(base64Auth)", forHTTPHeaderField: "Authorization")
-            }
-        }
+        addAuthentication(to: &request)
 
         if let expectedETag = expectedETag {
-            guard !expectedETag.hasPrefix("W/") else {
-                throw StorageError.notSupported("A weak ETag cannot protect a move operation")
-            }
-            request.setValue(expectedETag, forHTTPHeaderField: "If-Match")
+            request.setValue(try WebDAVEntityTag.strong(expectedETag), forHTTPHeaderField: "If-Match")
         }
         
         // Destructive mutations do NOT use WebDAVRetryPolicy.perform.
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await boundedResponse(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
@@ -54,6 +49,7 @@ extension WebDAVClient {
         guard (200...299).contains(httpResponse.statusCode) else {
             throw WebDAVError.serverError(httpResponse.statusCode)
         }
+        return httpResponse.value(forHTTPHeaderField: "ETag")
     }
     
     /// Copy file or directory on remote storage (COPY)

@@ -41,6 +41,7 @@ extension FileProviderExtension {
                    oldParentIdentifier = nil
                }
                
+               if let current = originalVfsItem, !current.isDirectory { try self.validateBaseVersion(version, item: current) }
                // Handle moving item to Trash
                if parentItemIdentifier == .trashContainer {
                    logInfo(.fileOps, "🗑️ reparentItem to .trashContainer -> trashing item: \(fileId)")
@@ -48,61 +49,53 @@ extension FileProviderExtension {
                        completionHandler(nil, nil)
                        return
                    }
-                   let isRecycleBinFolder = self.vfs.isRecycleBinDirectory(id: item.id)
-                   let isAlreadyInBin = self.vfs.isItemInRecycleBin(item: item)
-                   let isBinEnabled = RecycleBinConfig.isEnabled(for: self.currentVaultIdentifier)
                    
-                   if isRecycleBinFolder {
-                       logInfo(.fileOps, "🧹 reparentItem: Trashing Recycle Bin folder itself -> emptying trash")
-                       try await self.vfs.emptyTrash()
-                       self.signalEnumeratorDebounced(for: .rootContainer)
-                       if let bin = self.vfs.getRecycleBinDirectory() {
-                           self.signalEnumeratorDebounced(for: NSFileProviderItemIdentifier(bin.id))
-                       }
-                       self.signalEnumeratorDebounced(for: .workingSet)
-                   } else if isBinEnabled && !isAlreadyInBin {
-                       logInfo(.fileOps, "🗑️ reparentItem to .trashContainer -> Soft-deleting to RecycleBin folder: \(item.name) (\(fileId))")
-                       _ = try await self.vfs.moveToRecycleBin(item: item)
-                       if let oldParent = oldParentIdentifier {
-                           self.signalEnumeratorDebounced(for: oldParent)
-                       }
-                       if let bin = self.vfs.getRecycleBinDirectory() {
-                           self.signalEnumeratorDebounced(for: NSFileProviderItemIdentifier(bin.id))
-                       }
-                       self.signalEnumeratorDebounced(for: .workingSet)
-                   } else {
-                       logInfo(.fileOps, "🔥 reparentItem to .trashContainer -> Permanently deleting item: \(item.name) (\(fileId)) (isInRecycleBin=\(isAlreadyInBin), isBinEnabled=\(isBinEnabled))")
-                       let baseline = self.syncManager.getMetadata(fileId: fileId)
-                       let remotePath = item.remotePath ?? baseline?.remotePath ?? ""
-                       if !remotePath.isEmpty {
-                           try? self.syncManager.enqueuePersistent(.deleteItem(
-                               fileId: fileId,
-                               remotePath: remotePath,
-                               isDirectory: item.isDirectory,
-                               directoryId: item.isDirectory && self.vfs.isEncrypted ? fileId : nil,
-                               vaultId: self.currentVaultIdentifier
-                           ))
-                       }
-                       self.vfs.deleteFromLocalDatabaseOnly(itemId: fileId)
-                       if item.isDirectory {
-                           self.cacheManager.removeDirectoryCache(forDirectoryPrefix: fileId)
-                       } else {
-                           try? self.cacheManager.removeCachedFile(fileId: fileId)
-                       }
-                       ThumbnailManager.shared.invalidate(fileId: self.thumbnailIdentifier(fileId))
-                       try? RecycleBinStore.shared.deleteByFileId(fileId: fileId)
-                       if let oldParent = oldParentIdentifier {
-                           self.signalEnumeratorDebounced(for: oldParent)
-                       }
-                       self.signalEnumeratorDebounced(for: .workingSet)
+                   // Guard against accidental destruction of Cryptomator vault critical files
+                   let protectedNames: Set<String> = ["masterkey.cryptomator", "masterkey.bkup", "vault.cryptomator", "dirid.c9r"]
+                   if protectedNames.contains(item.name.lowercased()) {
+                       logError(.system, "🛡️ Blocked trashing of protected Cryptomator vault file: \(item.name)")
+                       throw NSFileProviderError(.deletionRejected)
                    }
+                   logInfo(.fileOps, "🔥 reparentItem to .trashContainer -> Deleting item: \(item.name) (\(fileId))")
+                   if item.isDirectory { try self.preserveLocalEditBeforeDeletion(item, fileId: fileId) }
+                   let baseline = try self.syncManager.getMetadataPersistent(fileId: fileId)
+                   let remotePath = item.remotePath ?? baseline?.remotePath ?? ""
+                   if !remotePath.isEmpty && baseline?.syncStatus != .localOnly {
+                       var tombstone = baseline ?? FileMetadata(fileId: fileId, name: item.name, parentId: item.parentId, isDirectory: item.isDirectory, syncStatus: .pendingDelete, remotePath: remotePath, size: item.size)
+                       if !item.isDirectory && (baseline?.syncStatus.protectsLocalChanges == true || self.syncManager.hasPendingUpload(fileId: fileId)) {
+                           let source = baseline?.localPath.map { URL(fileURLWithPath: $0) } ?? self.cacheManager.localPath(for: fileId)
+                           let backups = DeletedPayloadBackupStore(vaultId: self.currentVaultIdentifier)
+                           let backup = try backups.preserve(source: source, fileId: fileId, name: item.name, parentId: item.parentId, remotePath: remotePath, expectedETag: baseline?.etag)
+                           tombstone.localPath = try backups.payload(for: backup.id, verifyIntegrity: false).path
+                       }
+                       tombstone.syncStatus = .pendingDelete
+                       try self.syncManager.updateMetadataPersistent(tombstone)
+                       try self.syncManager.enqueuePersistent(.deleteItem(
+                           fileId: fileId,
+                           remotePath: remotePath,
+                           isDirectory: item.isDirectory,
+                           directoryId: item.isDirectory && self.vfs.isEncrypted ? fileId : nil,
+                           vaultId: self.currentVaultIdentifier
+                       ))
+                   }
+                   self.vfs.deleteFromLocalDatabaseOnly(itemId: fileId)
+                   if item.isDirectory {
+                       self.cacheManager.removeDirectoryCache(forDirectoryPrefix: fileId)
+                   } else {
+                       try? self.cacheManager.removeCachedFile(fileId: fileId)
+                   }
+                   ThumbnailManager.shared.invalidate(fileId: self.thumbnailIdentifier(fileId))
+                   if let oldParent = oldParentIdentifier {
+                       self.signalEnumeratorDebounced(for: oldParent)
+                   }
+                   self.signalEnumeratorDebounced(for: .workingSet)
                    
                    let trashedItem = self.makeItem(
                        identifier: identifier,
                        parentIdentifier: .trashContainer,
                        filename: item.name,
                        contentType: item.isDirectory ? .folder : .data,
-                       capabilities: [.allowsReading, .allowsDeleting],
+                       capabilities: [.allowsReading, .allowsDeleting, .allowsReparenting],
                        documentSize: item.size > 0 ? item.size : nil,
                        contentModificationDate: item.modifiedAt,
                        creationDate: item.modifiedAt,
@@ -113,7 +106,7 @@ extension FileProviderExtension {
                    return
                }
                
-               if let current = originalVfsItem { try? self.validateBaseVersion(version, item: current) }
+               if let current = originalVfsItem { try self.validateBaseVersion(version, item: current) }
                let targetParentId = parentItemIdentifier.rawValue
                let actualTargetParentId: String
                if targetParentId == NSFileProviderItemIdentifier.rootContainer.rawValue {
@@ -148,42 +141,6 @@ extension FileProviderExtension {
                    newParentId: actualTargetParentId,
                    newName: newName
                )
-               
-               let isMovingIntoBin = self.vfs.isRecycleBinDirectory(id: actualTargetParentId)
-               let wasInBin = (originalVfsItem != nil && self.vfs.isItemInRecycleBin(item: originalVfsItem!))
-               
-               if isMovingIntoBin {
-                   if !vfsItem.isDirectory {
-                       try? self.cacheManager.removeCachedFile(fileId: vfsItem.id)
-                       try? self.cacheManager.removeCachedFile(fileId: fileId)
-                   } else {
-                       self.cacheManager.removeDirectoryCache(forDirectoryPrefix: vfsItem.id)
-                       self.cacheManager.removeDirectoryCache(forDirectoryPrefix: fileId)
-                   }
-                   if var meta = self.syncManager.getMetadata(fileId: vfsItem.id) {
-                       meta.localPath = nil
-                       meta.syncStatus = .cloudOnly
-                       self.syncManager.updateMetadata(meta)
-                   }
-                   let binItem = RecycleBinItem(
-                       id: UUID().uuidString,
-                       vaultId: self.currentVaultIdentifier,
-                       fileId: vfsItem.id,
-                       name: vfsItem.name,
-                       originalParentId: originalVfsItem?.parentId ?? "ROOT",
-                       originalRemotePath: originalVfsItem?.remotePath ?? "",
-                       isDirectory: vfsItem.isDirectory,
-                       size: vfsItem.size,
-                       deletedAt: Date(),
-                       localBackupPath: nil
-                   )
-                   try? RecycleBinStore.shared.save(binItem)
-                   logInfo(.fileOps, "🗑️ reparentItem: Dragged into Recycle Bin -> local cache purged, marked cloudOnly")
-               } else if wasInBin {
-                   try? RecycleBinStore.shared.deleteByFileId(fileId: fileId)
-                   try? RecycleBinStore.shared.deleteByFileId(fileId: vfsItem.id)
-                   logInfo(.fileOps, "♻️ reparentItem: Dragged out of Recycle Bin -> restored")
-               }
                
                operationManager.updateOperation(id: operationId, status: .completed)
                
@@ -225,7 +182,7 @@ extension FileProviderExtension {
                completionHandler(nil, error)
            } catch {
                logError(.fileOps, "❌ FileProvider: Unknown error in reparentItem: \(error)")
-               let fpError = NSFileProviderError(.cannotSynchronize)
+               let fpError = mapToFileProviderError(error)
                progress.completedUnitCount = 100
                completionHandler(nil, fpError)
            }

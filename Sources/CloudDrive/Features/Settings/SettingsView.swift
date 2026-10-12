@@ -11,11 +11,12 @@
 import SwiftUI
 import AppKit
 import CloudDriveCore
+import CloudDriveSupport
+import CloudDriveCache
 
 enum SettingsTab: String, CaseIterable, Identifiable {
     case general = "general"
     case cache = "cache"
-    case recycleBin = "recycleBin"
     case ignore = "ignore"
     case logs = "logs"
     case about = "about"
@@ -26,7 +27,6 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: return L("tab_general")
         case .cache: return L("tab_cache")
-        case .recycleBin: return L("tab_recycle_bin")
         case .ignore: return L("tab_ignore_rules")
         case .logs: return L("tab_logs")
         case .about: return L("tab_about")
@@ -37,7 +37,6 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "gearshape.fill"
         case .cache: return "internaldrive.fill"
-        case .recycleBin: return "trash.fill"
         case .ignore: return "eye.slash.fill"
         case .logs: return "doc.text.fill"
         case .about: return "info.circle.fill"
@@ -48,7 +47,6 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: return .blue
         case .cache: return .purple
-        case .recycleBin: return .red
         case .ignore: return .orange
         case .logs: return .green
         case .about: return .cyan
@@ -58,6 +56,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 
 struct SettingsView: View {
     @Environment(\.dismiss) var dismiss
+    @EnvironmentObject private var appState: AppState
     @ObservedObject private var localization = LocalizationManager.shared
     @State private var selectedTab: SettingsTab = .general
     
@@ -126,8 +125,6 @@ struct SettingsView: View {
                         GeneralSettingsView()
                     case .cache:
                         CacheSettingsView()
-                    case .recycleBin:
-                        RecycleBinView()
                     case .ignore:
                         IgnoreSettingsView()
                     case .logs:
@@ -275,22 +272,26 @@ struct CacheSettingsView: View {
     @ObservedObject private var localization = LocalizationManager.shared
     @ObservedObject private var settings = AppSettings.shared
     @State private var selectedVaultId: String = "all"
-    @State private var cacheSize: String? = nil
+    
+    @State private var diskSpaceInfo: DiskSpaceInfo? = nil
+    @State private var dynamicCacheSize: String? = nil
+    @State private var pinnedCacheSize: String? = nil
+    @State private var pinnedCount: Int = 0
+    @State private var thumbnailCacheSize: String? = nil
+    
     @State private var isClearing = false
     @State private var showClearedAlert = false
     
-    @State private var thumbnailCacheSize: String? = nil
-    @State private var pinnedCount: Int = 0
-    
     var body: some View {
         Form {
+            // MARK: - 存储与使用概览 (Storage & Usage Breakdown)
             Section {
                 if !appState.vaults.isEmpty {
                     HStack {
-                        Text(L("recycle_bin_filter_vault"))
+                        Text(L("cache_filter_vault"))
                         Spacer()
                         Picker("", selection: $selectedVaultId) {
-                            Text(L("recycle_bin_all_vaults")).tag("all")
+                            Text(L("sidebar_all_vaults")).tag("all")
                             ForEach(appState.vaults) { vault in
                                 Text(vault.name).tag(vault.id)
                             }
@@ -304,40 +305,132 @@ struct CacheSettingsView: View {
                     }
                 }
                 
+                // Mac 本地磁盘可用空间
                 HStack {
-                    Text(L("settings_current_cache"))
+                    HStack(spacing: 6) {
+                        Image(systemName: "internaldrive")
+                            .foregroundColor(.blue)
+                        Text(L("cache_mac_disk_space"))
+                    }
                     Spacer()
-                    Text(cacheSize ?? L("settings_calculating"))
+                    if let disk = diskSpaceInfo {
+                        Text(disk.summary)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundColor(.primary)
+                    } else {
+                        Text(L("settings_calculating"))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                // 动态临时缓存 (按需在线读取产生，受配额/智能模式淘汰管理)
+                HStack {
+                    HStack(spacing: 6) {
+                        Image(systemName: "bolt.horizontal.circle")
+                            .foregroundColor(.orange)
+                        Text(L("cache_dynamic_size"))
+                    }
+                    Spacer()
+                    Text(dynamicCacheSize ?? L("settings_calculating"))
                         .font(.system(.body, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
                 
+                // 始终保留在此 Mac (用户明确下载/保留，完全独立占用，绝不淘汰)
                 HStack {
-                    Text(L("cache_quota_title"))
+                    HStack(spacing: 6) {
+                        Image(systemName: "pin.circle.fill")
+                            .foregroundColor(.green)
+                        Text(L("cache_pinned_size"))
+                    }
                     Spacer()
-                    Picker("", selection: $settings.maxCacheQuotaGB) {
-                        Text("2 GB").tag(2)
-                        Text("5 GB").tag(5)
-                        Text(L("cache_quota_default", 10)).tag(10)
-                        Text("20 GB").tag(20)
-                        Text("50 GB").tag(50)
-                        Text("100 GB").tag(100)
+                    HStack(spacing: 4) {
+                        Text(pinnedCacheSize ?? L("settings_calculating"))
+                            .font(.system(.body, design: .monospaced))
+                        Text("(\(L("cache_pinned_items_unit", pinnedCount)))")
+                            .foregroundColor(.secondary)
+                    }
+                }
+            } header: {
+                Text(L("settings_cache_storage"))
+            } footer: {
+                Text(L("cache_storage_breakdown_desc"))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            
+            // MARK: - 缓存管理策略 (Cache Management Strategy)
+            Section {
+                HStack {
+                    Text(L("cache_mode_title"))
+                    Spacer()
+                    Picker("", selection: $settings.cacheManagementMode) {
+                        Text(L("cache_mode_smart")).tag(CacheManagementMode.smart)
+                        Text(L("cache_mode_fixed")).tag(CacheManagementMode.fixed)
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
-                    .frame(width: 140)
-                    .onChange(of: settings.maxCacheQuotaGB) { newValue in
-                        let quotaBytes = Int64(newValue) * 1024 * 1024 * 1024
-                        VirtualFileSystem.shared.cacheManager.maxCacheSize = quotaBytes
-                        if selectedVaultId != "all" {
-                            CacheManager.forVault(selectedVaultId).maxCacheSize = quotaBytes
-                        }
-                        updateCacheSize()
+                    .frame(width: 250)
+                    .onChange(of: settings.cacheManagementMode) { _ in
+                        triggerEvictionAndRefresh()
                     }
                 }
                 
+                if settings.cacheManagementMode == .smart {
+                    HStack {
+                        Text(L("cache_smart_headroom_title"))
+                        Spacer()
+                        Picker("", selection: $settings.smartFreeSpacePercentage) {
+                            Text("10%").tag(10)
+                            Text(L("cache_smart_percentage_recommended", 15)).tag(15)
+                            Text("20%").tag(20)
+                            Text("25%").tag(25)
+                            Text("30%").tag(30)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(width: 170)
+                        .onChange(of: settings.smartFreeSpacePercentage) { _ in
+                            triggerEvictionAndRefresh()
+                        }
+                    }
+                } else {
+                    HStack {
+                        Text(L("cache_quota_title"))
+                        Spacer()
+                        Picker("", selection: $settings.maxCacheQuotaGB) {
+                            Text("2 GB").tag(2)
+                            Text("5 GB").tag(5)
+                            Text(L("cache_quota_default", 10)).tag(10)
+                            Text("20 GB").tag(20)
+                            Text("50 GB").tag(50)
+                            Text("100 GB").tag(100)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(width: 170)
+                        .onChange(of: settings.maxCacheQuotaGB) { newValue in
+                            let quotaBytes = Int64(newValue) * 1024 * 1024 * 1024
+                            VirtualFileSystem.shared.cacheManager.maxCacheSize = quotaBytes
+                            if selectedVaultId != "all" {
+                                CacheManager.forVault(selectedVaultId).maxCacheSize = quotaBytes
+                            }
+                            triggerEvictionAndRefresh()
+                        }
+                    }
+                }
+            } header: {
+                Text(L("cache_mode_title"))
+            } footer: {
+                Text(settings.cacheManagementMode == .smart ? L("cache_smart_headroom_desc") : L("cache_fixed_quota_desc"))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            
+            // MARK: - 清理临时缓存
+            Section {
                 HStack {
-                    Text(L("settings_clear_cache"))
+                    Text(L("cache_clear_dynamic_only"))
                     Spacer()
                     Button {
                         clearCache()
@@ -353,14 +446,13 @@ struct CacheSettingsView: View {
                     .buttonStyle(.bordered)
                     .disabled(isClearing)
                 }
-            } header: {
-                Text(L("settings_cache_storage"))
             } footer: {
-                Text(L("settings_clear_cache_desc"))
+                Text(L("cache_clear_dynamic_only_desc"))
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
             
+            // MARK: - 缩略图缓存
             Section {
                 HStack {
                     Text(L("cache_thumbnail_size"))
@@ -388,6 +480,7 @@ struct CacheSettingsView: View {
                     .foregroundColor(.secondary)
             }
             
+            // MARK: - 固定保留文件管理
             Section {
                 HStack {
                     Text(L("cache_pinned_count"))
@@ -427,9 +520,35 @@ struct CacheSettingsView: View {
     }
     
     private func updateAll() {
+        updateDiskSpace()
         updateCacheSize()
         updateThumbnailCacheSize()
         updatePinnedCount()
+    }
+    
+    private func updateDiskSpace() {
+        let space = DiskSpaceHelper.currentDiskSpace()
+        DispatchQueue.main.async {
+            self.diskSpaceInfo = space
+        }
+    }
+    
+    private func triggerEvictionAndRefresh() {
+        let vaultIds = appState.vaults.map { $0.id }
+        let selected = selectedVaultId
+        DispatchQueue.global(qos: .userInitiated).async {
+            if selected == "all" {
+                try? VirtualFileSystem.shared.cacheManager.cleanupIfNeeded()
+                for vid in vaultIds {
+                    try? CacheManager.forVault(vid).cleanupIfNeeded()
+                }
+            } else {
+                try? CacheManager.forVault(selected).cleanupIfNeeded()
+            }
+            DispatchQueue.main.async {
+                updateAll()
+            }
+        }
     }
     
     private func updatePinnedCount() {
@@ -461,7 +580,7 @@ struct CacheSettingsView: View {
                 }
             }
             DispatchQueue.main.async {
-                updatePinnedCount()
+                updateAll()
             }
         }
     }
@@ -470,15 +589,21 @@ struct CacheSettingsView: View {
         let vaultIds = appState.vaults.map { $0.id }
         let selected = selectedVaultId
         DispatchQueue.global(qos: .userInitiated).async {
-            let size: Int64
+            let dynamicSize: Int64
+            let pinnedSize: Int64
             if selected == "all" {
-                size = CacheManager.totalCacheSizeAcrossAllVaults(knownVaultIds: vaultIds)
+                dynamicSize = CacheManager.totalDynamicCacheSizeAcrossAllVaults(knownVaultIds: vaultIds)
+                pinnedSize = CacheManager.totalPinnedCacheSizeAcrossAllVaults(knownVaultIds: vaultIds)
             } else {
-                size = CacheManager.forVault(selected).currentCacheSize()
+                let mgr = CacheManager.forVault(selected)
+                dynamicSize = mgr.currentDynamicCacheSize()
+                pinnedSize = mgr.currentPinnedCacheSize()
             }
-            let formatted = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+            let formattedDynamic = ByteCountFormatter.string(fromByteCount: dynamicSize, countStyle: .file)
+            let formattedPinned = ByteCountFormatter.string(fromByteCount: pinnedSize, countStyle: .file)
             DispatchQueue.main.async {
-                self.cacheSize = formatted
+                self.dynamicCacheSize = formattedDynamic
+                self.pinnedCacheSize = formattedPinned
             }
         }
     }
@@ -504,8 +629,7 @@ struct CacheSettingsView: View {
                 try? CacheManager.forVault(selected).clearAllCache()
             }
             DispatchQueue.main.async {
-                updateCacheSize()
-                updatePinnedCount()
+                updateAll()
                 isClearing = false
                 showClearedAlert = true
             }
@@ -561,7 +685,7 @@ struct AboutView: View {
                     .font(.title2)
                     .fontWeight(.bold)
                 
-                Text(L("about_version"))
+                Text(appVersionString)
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
@@ -589,6 +713,20 @@ struct AboutView: View {
                 .padding(.bottom, 12)
         }
         .padding()
+    }
+    
+    private var appVersionString: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+        var dateStr = ""
+        if let execPath = Bundle.main.executablePath,
+           let attrs = try? FileManager.default.attributesOfItem(atPath: execPath),
+           let date = attrs[.modificationDate] as? Date {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd HH:mm"
+            dateStr = " (Build \(formatter.string(from: date)))"
+        }
+        return "v\(version) \(dateStr.isEmpty ? "Build " + build : dateStr)"
     }
 }
 

@@ -124,6 +124,12 @@ extension VirtualFileSystem {
             try? CredentialStore.shared.storeMasterKey(finalMasterKey, forVault: vaultId)
         }
         
+        // 6. 安全清理：确保远端不存在任何暴露未加密主密钥的 legacy salt 文件
+        if (try? await storageClient.exists(path: saltPath)) == true {
+            try? await storageClient.delete(path: saltPath)
+            print("🛡️ [VFS] Purged legacy remote salt file after password change")
+        }
+        
         print("🎉 [VFS] Vault password changed successfully for vault: \(vaultId)")
     }
 }

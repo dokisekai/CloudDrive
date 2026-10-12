@@ -75,7 +75,8 @@ let package = Package(
             dependencies: [
                 "CloudDriveContracts",
                 "CloudDriveSupport",
-                "CloudDriveSecurity"
+                "CloudDriveSecurity",
+                "CloudDriveStorage"
             ]
         ),
         .target(
@@ -138,7 +139,8 @@ let package = Package(
             dependencies: [
                 "CloudDriveContracts",
                 "CloudDriveSupport",
-                "CloudDrivePersistence"
+                "CloudDrivePersistence",
+                "CloudDriveSecurity"
             ]
         ),
 
@@ -180,7 +182,8 @@ let package = Package(
             name: "CloudDriveApp",
             dependencies: [
                 "CloudDriveCore",
-                "CloudDriveStorage"
+                "CloudDriveStorage",
+                "CloudDriveSystem"
             ],
             path: "Sources/CloudDrive",
             exclude: [
@@ -192,8 +195,10 @@ let package = Package(
         .executableTarget(
             name: "CloudDriveTestsRunner",
             dependencies: [
+                "CloudDriveFileProvider",
                 "CloudDriveCore",
                 "CloudDriveStorage",
+                "CloudDriveSystem",
                 .product(name: "CryptomatorCryptoLib", package: "cryptolib-swift")
             ],
             path: "Tests/CloudDriveCoreTests"

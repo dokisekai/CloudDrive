@@ -1,6 +1,7 @@
 import CloudDriveContracts
 import CloudDriveSupport
 import CloudDriveSecurity
+import CloudDriveStorage
 //
 //  FileProviderDomainService.swift
 //  CloudDriveCore
@@ -43,15 +44,76 @@ public final class FileProviderDomainService: @unchecked Sendable {
         let domain = NSFileProviderDomain(identifier: domainIdentifier, displayName: vault.name)
         
         var userInfo = [AnyHashable: Any]()
-        var sanitized = vault
-        sanitized.storageConfig = sanitized.storageConfig?.withoutSecrets
-        if let data = try? JSONEncoder().encode(sanitized), let jsonStr = String(data: data, encoding: .utf8) {
+        // 传递完整保险库配置给自身扩展 (包含已配置的协议参数)，避免脱敏后导致扩展进程丢失云端通信能力
+        if let data = try? JSONEncoder().encode(vault), let jsonStr = String(data: data, encoding: .utf8) {
             userInfo["vaultConfig"] = jsonStr
         }
         
         let sp = storagePassword ?? CredentialStore.shared.getStoragePassword(for: vault.id)
+        let vp = vaultPassword ?? CredentialStore.shared.getVaultPassword(for: vault.id)
         if let bookmark = vault.bookmarkData {
             userInfo["bookmarkData"] = bookmark.base64EncodedString()
+        }
+        if let sp = sp {
+            userInfo["webdavPassword"] = sp
+            userInfo["storagePassword"] = sp
+        }
+        if vault.storageType == .baidupan || vault.storageConfig?.type == .baidupan {
+            let panConfig = (vault.storageConfig.flatMap { cfg -> BaiduPanStorageConfig? in
+                if case .baidupan(let c) = cfg { return c }
+                return nil
+            }) ?? BaiduPanStorageConfig()
+            if !panConfig.clientSecret.isEmpty {
+                userInfo["clientSecret"] = panConfig.clientSecret
+            }
+            let tokenStore = BaiduPanTokenStore()
+            var foundRecord = (try? tokenStore.readRecordPublic(vault.id)) ?? (try? tokenStore.readRecordPublic("default")) ?? BaiduPanTokenStore.getInMemoryToken(vaultID: vault.id) ?? BaiduPanTokenStore.getInMemoryToken(vaultID: "default")
+            if foundRecord == nil || foundRecord?.accessToken.isEmpty == true {
+                if let kcData = CredentialStore.shared.getBaiduPanToken(for: vault.id) ?? CredentialStore.shared.getBaiduPanToken(for: "default"),
+                   let kcPayload = try? JSONDecoder().decode(BaiduPanTokenStore.TokenPayload.self, from: kcData),
+                   !kcPayload.accessToken.isEmpty {
+                    foundRecord = BaiduPanTokenStore.Record(
+                        vaultID: vault.id,
+                        accessToken: kcPayload.accessToken,
+                        refreshToken: kcPayload.refreshToken,
+                        expiresAt: kcPayload.expiresAt,
+                        generation: kcPayload.generation,
+                        needsReauth: kcPayload.needsReauth
+                    )
+                }
+            }
+            if (foundRecord == nil || foundRecord?.accessToken.isEmpty == true) && !panConfig.accessToken.isEmpty {
+                foundRecord = BaiduPanTokenStore.Record(
+                    vaultID: vault.id,
+                    accessToken: panConfig.accessToken,
+                    refreshToken: panConfig.refreshToken,
+                    expiresAt: panConfig.expiresAt ?? Date().addingTimeInterval(25 * 86400),
+                    generation: 0,
+                    needsReauth: false
+                )
+            }
+            if let record = foundRecord, !record.accessToken.isEmpty {
+                let payload = BaiduPanTokenStore.TokenPayload(
+                    vaultID: vault.id,
+                    appID: panConfig.appID,
+                    clientID: panConfig.appKey,
+                    accessToken: record.accessToken,
+                    refreshToken: record.refreshToken,
+                    expiresAt: record.expiresAt,
+                    generation: record.generation,
+                    needsReauth: false
+                )
+                if let tokenData = try? JSONEncoder().encode(payload),
+                   let tokenStr = String(data: tokenData, encoding: .utf8) {
+                    userInfo["baiduToken"] = tokenStr
+                    Logger.shared.info(.system, "🔑 [FileProviderDomainService] Injected baiduToken into domain userInfo for \(vault.id), len: \(record.accessToken.count)")
+                }
+            } else {
+                Logger.shared.warning(.system, "⚠️ [FileProviderDomainService] No valid token found to inject for vault \(vault.id)")
+            }
+        }
+        if let vp = vp {
+            userInfo["vaultPassword"] = vp
         }
         
         #if os(macOS)
@@ -61,10 +123,10 @@ public final class FileProviderDomainService: @unchecked Sendable {
         #endif
         
         if let sp = sp {
-            guard CredentialStore.shared.saveStoragePassword(sp, for: vault.id) else { throw VFSError.authenticationFailed }
+            _ = CredentialStore.shared.saveStoragePassword(sp, for: vault.id)
         }
-        if let vp = vaultPassword {
-            guard CredentialStore.shared.saveVaultPassword(vp, for: vault.id) else { throw VFSError.authenticationFailed }
+        if let vp = vp {
+            _ = CredentialStore.shared.saveVaultPassword(vp, for: vault.id)
         }
         
         VaultRegistry.shared.saveVaultConfig(vault)
@@ -75,12 +137,11 @@ public final class FileProviderDomainService: @unchecked Sendable {
             try await NSFileProviderManager.add(domain)
             Logger.shared.info(.system, "FileProviderDomainService: Domain registered successfully")
         } catch let error as NSError where error.code == 516 {
-            // Re-registering must not remove a domain with materialized or dirty files.
-            Logger.shared.info(.system, "FileProviderDomainService: Reconnecting existing domain")
-            if let manager = NSFileProviderManager(for: domain) {
-                try await manager.reconnect()
-                await EnumeratorSignaler.shared.signalImmediately(for: domain)
-            }
+            Logger.shared.info(.system, "FileProviderDomainService: Domain already exists (516), replacing to update credentials...")
+            try? await NSFileProviderManager.remove(domain)
+            try await NSFileProviderManager.add(domain)
+            Logger.shared.info(.system, "FileProviderDomainService: Domain re-registered successfully with updated credentials")
+            await EnumeratorSignaler.shared.signalImmediately(for: domain)
         } catch {
             Logger.shared.error(.system, "FileProviderDomainService: Failed to register domain: \(error)")
             throw error
@@ -89,6 +150,7 @@ public final class FileProviderDomainService: @unchecked Sendable {
     
     /// 移除已注销的 Domain
     public func unregisterDomain(for vault: VaultInfo) async throws {
+        FileProgressPublisher.shared.cancelTransfers(for: vault.id)
         let domain = makeDomain(for: vault)
         try await NSFileProviderManager.remove(domain)
         Logger.shared.info(.system, "FileProviderDomainService: Domain removed: \(domain.identifier.rawValue)")

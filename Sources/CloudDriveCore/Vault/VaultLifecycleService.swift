@@ -28,6 +28,7 @@ public final class VaultLifecycleService: @unchecked Sendable {
         storagePassword: String,
         vaultPassword: String
     ) async throws -> VaultInfo {
+        guard storageConfig.type.isAvailable else { throw StorageError.notSupported("Only WebDAV is enabled") }
         vfs.configureStorage(configuration: storageConfig)
         
         let vaultId = try await vfs.initializeVault(name: name, password: vaultPassword, storagePath: "/")
@@ -66,6 +67,7 @@ public final class VaultLifecycleService: @unchecked Sendable {
         remotePath: String,
         vaultPassword: String
     ) async throws -> VaultInfo {
+        guard storageConfig.type.isAvailable else { throw StorageError.notSupported("Only WebDAV is enabled") }
         vfs.configureStorage(configuration: storageConfig)
         
         var cleanPath = remotePath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -114,8 +116,10 @@ public final class VaultLifecycleService: @unchecked Sendable {
     
     /// 解锁已配置的保险库
     public func unlockVault(vault: VaultInfo, vaultPassword: String) async throws {
+        guard vault.isStorageEnabled else { throw StorageError.notSupported("Only WebDAV is enabled") }
         let storagePassword = credentialStore.getStoragePassword(for: vault.id) ?? ""
         let storageConfig = StorageClientFactory.createConfiguration(from: vault, password: storagePassword)
+        guard storageConfig.type.isAvailable else { throw StorageError.notSupported("Only WebDAV is enabled") }
         vfs.configureStorage(configuration: storageConfig)
         
         try await vfs.unlockVault(password: vaultPassword, storagePath: vault.storagePath, vaultId: vault.id)
@@ -124,6 +128,7 @@ public final class VaultLifecycleService: @unchecked Sendable {
     
     /// 修改加密保险库主密码 (重加密云端 masterkey.cryptomator 并更新本地钥匙串)
     public func changeVaultPassword(vault: VaultInfo, oldPassword: String, newPassword: String) async throws {
+        guard vault.isStorageEnabled else { throw StorageError.notSupported("Only WebDAV is enabled") }
         let storagePassword = credentialStore.getStoragePassword(for: vault.id) ?? ""
         let storageConfig = StorageClientFactory.createConfiguration(from: vault, password: storagePassword)
         let client = StorageClientFactory.createClient(configuration: storageConfig)
@@ -131,8 +136,7 @@ public final class VaultLifecycleService: @unchecked Sendable {
         let targetVFS = (vfs.currentVaultId == vault.id) ? vfs : VirtualFileSystem(vaultId: vault.id)
         targetVFS.configureStorage(client: client)
         
-        let isLoopback = vault.isLocal || vault.webdavURL?.contains("127.0.0.1") == true
-        let effectiveStoragePath = isLoopback ? "/" : vault.storagePath
+        let effectiveStoragePath = vault.storagePath
         
         try await targetVFS.changeVaultPassword(oldPassword: oldPassword, newPassword: newPassword, storagePath: effectiveStoragePath, vaultId: vault.id)
         
