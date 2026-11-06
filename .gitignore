@@ -25,3 +25,9 @@ Icon
 # Temporary & Disabled
 *.disabled
 *.log
+
+# Credentials & Secrets
+.env
+.env.*
+*.key
+*.pem
